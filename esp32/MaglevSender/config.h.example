@@ -1,0 +1,10 @@
+#pragma once
+// Copiar este archivo como config.h y completar localmente. No compartir config.h.
+const char* WIFI_SSID = "";
+const char* WIFI_PASSWORD = "";
+const char* API_URL = "https://TU_DOMINIO/api/ingest";
+const char* DEVICE_ID = "";   // Configuración > Registrar dispositivo
+const char* DEVICE_TOKEN = "";
+// Certificado CA raíz PEM del dominio HTTPS de API_URL. No usar setInsecure().
+const char* ROOT_CA = R"PEM(
+)PEM";
