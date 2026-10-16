@@ -5,6 +5,7 @@ import { errorMessage, fresh } from '@/lib/format';
 import type { Device, Measurement, TrainStatus, SolarStation } from '@/lib/database.types';
 type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; measurements: Measurement[]; train: TrainStatus[]; solar: SolarStation[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
 const Context = createContext<Feed | null>(null);
+let channelSequence = 0;
 export function TelemetryProvider({ children }: { children: ReactNode }) {
   const [devices, setDevices] = useState<Device[]>([]); const [deviceId, selectDevice] = useState('');
   const [measurements, setMeasurements] = useState<Measurement[]>([]); const [train, setTrain] = useState<TrainStatus[]>([]); const [solar, setSolar] = useState<SolarStation[]>([]);
@@ -33,18 +34,22 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     finally { if (current === version.current) setLoading(false); }
   }, [deviceId]);
   useEffect(() => {
-    setLoading(true); setMeasurements([]); setTrain([]); setSolar([]); setLastSync(null); setError('');
+    setLoading(true); setMeasurements([]); setTrain([]); setSolar([]); setLastSync(null); setError(''); setRealtime('CONNECTING');
     void refresh();
-    const client = getSupabase(); let timer: ReturnType<typeof setTimeout> | undefined;
-    const queueRefresh = () => { if (timer) return; timer = setTimeout(() => { timer = undefined; void refresh(); }, 350); };
-    let channel = client.channel(`telemetry-${deviceId || 'none'}`)
+    // `active` evita que eventos o estados tardíos del canal anterior (p. ej. CLOSED al terminar su salida)
+    // sobrescriban el estado del canal nuevo o programen consultas con el dispositivo anterior.
+    const client = getSupabase(); let timer: ReturnType<typeof setTimeout> | undefined; let active = true;
+    const queueRefresh = () => { if (!active || timer) return; timer = setTimeout(() => { timer = undefined; if (active) void refresh(); }, 350); };
+    // Tema único por suscripción: supabase-js reutiliza un canal con el mismo tema mientras aún se está cerrando,
+    // lo que dejaba la nueva suscripción sin callbacks (StrictMode o cambio rápido A → B → A).
+    let channel = client.channel(`telemetry-${deviceId || 'none'}-${++channelSequence}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, queueRefresh);
     if (deviceId) for (const table of ['measurements', 'train_status', 'solar_station']) {
       channel = channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `device_id=eq.${deviceId}` }, queueRefresh);
     }
-    channel.subscribe(status => { setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
+    channel.subscribe(status => { if (!active) return; setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
     const interval = setInterval(() => { void refresh(); }, 15000);
-    return () => { ++version.current; clearInterval(interval); clearTimeout(timer); void client.removeChannel(channel); };
+    return () => { active = false; ++version.current; clearInterval(interval); clearTimeout(timer); void client.removeChannel(channel); };
   }, [deviceId, refresh]);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
