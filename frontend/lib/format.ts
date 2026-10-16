@@ -7,7 +7,10 @@ export function fresh(value: string | null | undefined, now = Date.now()) {
   const age = now - new Date(value).getTime();
   return age >= -5000 && age < STALE_SECONDS * 1000;
 }
-export function errorMessage(error: unknown) { return error && typeof error === 'object' && 'message' in error ? String(error.message) : 'No fue posible completar la operación. Intenta de nuevo.'; }
+export function errorMessage(error: unknown) {
+  const message = error && typeof error === 'object' && 'message' in error && error.message != null ? String(error.message).trim() : '';
+  return message || 'No fue posible completar la operación. Intenta de nuevo.';
+}
 export function safeCsvCell(value: unknown) {
   const text = value == null ? '' : String(value);
   const safe = /^[=+@\-\t\r]/.test(text) && typeof value !== 'number' ? "'" + text : text;
