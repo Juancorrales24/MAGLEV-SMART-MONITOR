@@ -37,7 +37,16 @@ assert.equal((await db.query('select * from profiles')).rows.length,1);
 await assert.rejects(()=>db.query('select * from device_credentials'));
 await assert.rejects(()=>db.query(`update profiles set role='admin'`));
 await assert.rejects(()=>db.query(`select ingest_telemetry($1,$2,null,$3::jsonb,null,null)`,[device,sample,'{}']));
+await assert.rejects(()=>db.query('select * from ingest_receipts'));
 console.log('PASS: observador consulta datos, no secretos ni cambios de rol');
+await db.exec('reset role;');
+// Ninguna función SECURITY DEFINER de public queda ejecutable por clientes (sería invocable vía /rest/v1/rpc).
+rows=(await db.query(`select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.prosecdef and (has_function_privilege('authenticated',p.oid,'execute') or has_function_privilege('anon',p.oid,'execute'))`)).rows;
+assert.deepEqual(rows,[]);
+rows=(await db.query(`select tablename from pg_policies where schemaname='public' and tablename in ('device_credentials','ingest_receipts') and permissive='RESTRICTIVE' order by 1`)).rows;
+assert.deepEqual(rows.map(r=>r.tablename),['device_credentials','ingest_receipts']);
+await db.exec(`set role authenticated; set request.jwt.claim.sub='${observer}';`);
+console.log('PASS: funciones auxiliares de RLS fuera del esquema expuesto y secretos con denegación explícita');
 await db.exec(`set request.jwt.claim.sub='${outsider}';`);
 assert.equal((await db.query('select * from measurements')).rows.length,0);
 assert.equal((await db.query('select * from devices')).rows.length,0);
