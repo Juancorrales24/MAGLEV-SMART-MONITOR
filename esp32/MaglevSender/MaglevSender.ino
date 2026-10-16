@@ -85,7 +85,9 @@ void loop() {
   // TLS requiere hora válida para comprobar la vigencia del certificado.
   if (time(nullptr) < 1735689600) { delay(5); return; }
   lastSend = now;
-  WiFiClientSecure tls; tls.setCACert(ROOT_CA);  HTTPClient http; http.setTimeout(8000);
+  WiFiClientSecure tls; tls.setCACert(ROOT_CA);
+  tls.setHandshakeTimeout(10); // segundos; el valor por defecto (120 s) bloquea loop() con redes inestables.
+  HTTPClient http; http.setTimeout(8000);
   if (!http.begin(tls, API_URL)) { retryMs = min(retryMs * 2, 60000UL); return; }
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
