@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { telemetrySchema, newUserSchema } from '../lib/validation';
-import { fresh, toCsv } from '../lib/format';
+import { fresh, toCsv, errorMessage } from '../lib/format';
 const sample_id = 'c0f1dd43-6db9-46fd-8b89-399a2ce4c480';
 // Datos exclusivamente de prueba: nunca se cargan en la aplicación ni en Supabase.
 test('acepta cero real y conserva campos ausentes sin inventar cifras', () => {
@@ -35,4 +35,8 @@ test('una fecha antigua o ausente nunca se considera LIVE', () => {
 test('CSV escapa comillas, neutraliza fórmulas de texto y mantiene números', () => {
   const csv = toCsv(['Nombre', 'Valor'], [['=SUM(A1:A2)', -4], ['texto "citado"', null]]);
   assert.ok(csv.includes('"\'=SUM(A1:A2)"')); assert.ok(csv.includes('"-4"')); assert.ok(csv.includes('texto ""citado""'));
+});
+test('un error sin mensaje nunca se muestra vacío', () => {
+  for (const e of [{ message: '' }, { message: '   ' }, { message: null }, new Error(''), null, 'texto']) assert.ok(errorMessage(e).length > 0);
+  assert.equal(errorMessage(new Error('fallo')), 'fallo');
 });
