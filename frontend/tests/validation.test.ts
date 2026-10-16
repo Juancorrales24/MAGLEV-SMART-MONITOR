@@ -19,6 +19,12 @@ test('rechaza identificadores erróneos, campos desconocidos y fecha futura', ()
   assert.equal(telemetrySchema.safeParse({ sample_id, measurements: { voltage: 2 }, admin: true }).success, false);
   assert.equal(telemetrySchema.safeParse({ sample_id, sampled_at: new Date(Date.now() + 600000).toISOString(), measurements: { voltage: 2 } }).success, false);
 });
+test('contrato con MaglevSender.ino: acepta su cuerpo y rechaza null que el firmware elimina', () => {
+  // Forma exacta que produce el firmware: UUID v4 en minúsculas y bloques del productor sin miembros null.
+  assert.equal(telemetrySchema.safeParse({ sample_id, sampled_at: '2026-01-01T00:00:00Z', measurements: { voltage: 12.5, energy: 1000000000000 }, train_status: { temperature: -3 }, solar_station: { battery_level: 0 } }).success, true);
+  // Sin el filtrado del firmware, un bloque o fecha null descartaría las lecturas válidas del mismo mensaje.
+  for (const extra of [{ train_status: null }, { sampled_at: null }]) assert.equal(telemetrySchema.safeParse({ sample_id, measurements: { voltage: 2 }, ...extra }).success, false);
+});
 test('exige contraseña inicial larga y rol conocido', () => {
   assert.equal(newUserSchema.safeParse({ name: 'Prueba', email: 'qa@example.com', password: 'short', role: 'admin' }).success, false);
   assert.equal(newUserSchema.safeParse({ name: 'Prueba', email: 'qa@example.com', password: 'long-password-123', role: 'root' }).success, false);

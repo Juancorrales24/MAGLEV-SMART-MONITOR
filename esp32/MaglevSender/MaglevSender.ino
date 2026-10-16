@@ -24,12 +24,30 @@ String newSampleId() {
   return String(id);
 }
 
+// null significa "desconocido" (Modelo_Datos.md) y ArduinoJson serializa NaN como null.
+// La API rechaza bloques null o sin números y descartaría también las lecturas válidas del mensaje.
+void dropNullMembers(JsonObject obj) {
+  for (bool removed = true; removed;) {
+    removed = false;
+    for (JsonObject::iterator it = obj.begin(); it != obj.end(); ++it)
+      if (it->value().isNull()) { obj.remove(it); removed = true; break; }
+  }
+}
+
 void acceptSensorLine(const String& line) {
   JsonDocument data;
   if (deserializeJson(data, line) || !data.is<JsonObject>()) {
     Serial.println("ERROR: JSON invalido del sensor."); return;
   }
-  if (!data["measurements"].is<JsonObject>() && !data["train_status"].is<JsonObject>() && !data["solar_station"].is<JsonObject>()) {
+  JsonObject root = data.as<JsonObject>();
+  if (root["sampled_at"].isNull()) root.remove("sampled_at");
+  bool hasBlock = false;
+  for (const char* name : {"measurements", "train_status", "solar_station"}) {
+    if (root[name].is<JsonObject>()) dropNullMembers(root[name].as<JsonObject>());
+    if (root[name].isNull() || (root[name].is<JsonObject>() && root[name].size() == 0)) root.remove(name);
+    else if (root[name].is<JsonObject>()) hasBlock = true;
+  }
+  if (!hasBlock) {
     Serial.println("ERROR: falta un bloque de mediciones reales."); return;
   }
   data["sample_id"] = newSampleId();
@@ -67,8 +85,7 @@ void loop() {
   // TLS requiere hora válida para comprobar la vigencia del certificado.
   if (time(nullptr) < 1735689600) { delay(5); return; }
   lastSend = now;
-  WiFiClientSecure tls; tls.setCACert(ROOT_CA);
-  HTTPClient http; http.setTimeout(8000);
+  WiFiClientSecure tls; tls.setCACert(ROOT_CA);  HTTPClient http; http.setTimeout(8000);
   if (!http.begin(tls, API_URL)) { retryMs = min(retryMs * 2, 60000UL); return; }
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
