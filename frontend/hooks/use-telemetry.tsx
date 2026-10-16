@@ -35,11 +35,19 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
   }, [deviceId]);
   useEffect(() => {
     setLoading(true); setMeasurements([]); setTrain([]); setSolar([]); setLastSync(null); setError(''); setRealtime('CONNECTING');
-    void refresh();
     // `active` evita que eventos o estados tardíos del canal anterior (p. ej. CLOSED al terminar su salida)
     // sobrescriban el estado del canal nuevo o programen consultas con el dispositivo anterior.
     const client = getSupabase(); let timer: ReturnType<typeof setTimeout> | undefined; let active = true;
-    const queueRefresh = () => { if (!active || timer) return; timer = setTimeout(() => { timer = undefined; if (active) void refresh(); }, 350); };
+    // Una sola consulta automática a la vez: cada refresh invalida al anterior, así que con lecturas cada
+    // segundo y una red lenta las consultas se descartaban entre sí y la vista nunca se actualizaba.
+    let running = false; let again = false;
+    const run = async () => {
+      if (!active) return; if (running) { again = true; return; }
+      running = true;
+      try { await refresh(); } finally { running = false; if (again && active) { again = false; void run(); } }
+    };
+    void run();
+    const queueRefresh = () => { if (!active || timer) return; timer = setTimeout(() => { timer = undefined; void run(); }, 350); };
     // Tema único por suscripción: supabase-js reutiliza un canal con el mismo tema mientras aún se está cerrando,
     // lo que dejaba la nueva suscripción sin callbacks (StrictMode o cambio rápido A → B → A).
     let channel = client.channel(`telemetry-${deviceId || 'none'}-${++channelSequence}`)
@@ -48,7 +56,7 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
       channel = channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `device_id=eq.${deviceId}` }, queueRefresh);
     }
     channel.subscribe(status => { if (!active) return; setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
-    const interval = setInterval(() => { void refresh(); }, 15000);
+    const interval = setInterval(() => { void run(); }, 15000);
     return () => { active = false; ++version.current; clearInterval(interval); clearTimeout(timer); void client.removeChannel(channel); };
   }, [deviceId, refresh]);
   useEffect(() => {
