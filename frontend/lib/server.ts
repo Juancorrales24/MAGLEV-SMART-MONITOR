@@ -1,9 +1,11 @@
 import 'server-only';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, isAuthError, isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import type { Database } from './database.types';
 export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
+/** Error de red o 5xx de Supabase Auth: no es una credencial inválida. */
+export function authUnavailable(error: unknown) { return isAuthRetryableFetchError(error) || (isAuthError(error) && (error.status ?? 0) >= 500); }
 export function serviceClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL; const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new HttpError(503, 'El servidor necesita la configuración de Supabase.');
@@ -13,9 +15,12 @@ export async function requireAdmin(request: Request) {
   const token = request.headers.get('authorization')?.match(/^Bearer (\S+)$/)?.[1];
   if (!token) throw new HttpError(401, 'Inicia sesión para continuar.');
   const client = serviceClient(); const { data: { user }, error } = await client.auth.getUser(token);
+  if (error && authUnavailable(error)) throw new HttpError(503, 'No se pudo verificar la sesión. Intenta de nuevo en unos segundos.');
   if (error || !user) throw new HttpError(401, 'La sesión no es válida.');
-  const { data: profile, error: profileError } = await client.from('profiles').select('*').eq('id', user.id).single();
-  if (profileError || !profile?.active || profile.role !== 'admin') throw new HttpError(403, 'Esta operación requiere un administrador activo.');
+  // maybeSingle: un fallo de la base es 5xx, no una falta de permisos.
+  const { data: profile, error: profileError } = await client.from('profiles').select('*').eq('id', user.id).maybeSingle();
+  if (profileError) throw profileError;
+  if (!profile?.active || profile.role !== 'admin') throw new HttpError(403, 'Esta operación requiere un administrador activo.');
   return { client, user, profile };
 }
 export async function readBody<T>(request: Request, schema: z.ZodType<T>): Promise<T> {

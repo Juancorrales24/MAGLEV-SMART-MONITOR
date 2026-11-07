@@ -1,12 +1,16 @@
 'use client';
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { errorMessage, fresh } from '@/lib/format';
-import type { Device, Measurement, TrainStatus, SolarStation } from '@/lib/database.types';
-type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; measurements: Measurement[]; train: TrainStatus[]; solar: SolarStation[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
+import { errorMessage, fresh, STALE_SECONDS } from '@/lib/format';
+import { linkState } from '@/lib/train-state';
+import type { Device, Measurement, TrainStatus, SolarStation, Station } from '@/lib/database.types';
+type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; stations: Station[]; measurements: Measurement[]; train: TrainStatus[]; solar: SolarStation[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
 const Context = createContext<Feed | null>(null);
+let channelSequence = 0;
 export function TelemetryProvider({ children }: { children: ReactNode }) {
   const [devices, setDevices] = useState<Device[]>([]); const [deviceId, selectDevice] = useState('');
+  // Los nombres de las estaciones son globales (tabla `stations`), no dependen del dispositivo seleccionado.
+  const [stations, setStations] = useState<Station[]>([]);
   const [measurements, setMeasurements] = useState<Measurement[]>([]); const [train, setTrain] = useState<TrainStatus[]>([]); const [solar, setSolar] = useState<SolarStation[]>([]);
   const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [realtime, setRealtime] = useState('CONNECTING');
   const [online, setOnline] = useState(true); const [now, setNow] = useState(Date.now()); const [lastSync, setLastSync] = useState<string | null>(null);
@@ -14,10 +18,15 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     const current = ++version.current; const client = getSupabase();
     try {
-      const d = await client.from('devices').select('*').order('created_at');
-      if (d.error) throw d.error;
+      // `stations` se consulta junto a `devices` para que los nombres estén disponibles incluso
+      // antes de elegir dispositivo y sin repetir la consulta por cada cambio de selección.
+      const [d, st] = await Promise.all([
+        client.from('devices').select('*').order('created_at'),
+        client.from('stations').select('*').order('position')
+      ]);
+      if (d.error || st.error) throw d.error || st.error;
       if (current !== version.current) return;
-      setDevices(d.data);
+      setDevices(d.data); setStations(st.data);
       const selected = d.data.some(x => x.id === deviceId) ? deviceId : (d.data.find(x => x.enabled)?.id ?? d.data[0]?.id ?? '');
       if (selected !== deviceId) { selectDevice(selected); return; }
       if (!selected) { setMeasurements([]); setTrain([]); setSolar([]); setError(''); setLastSync(new Date().toISOString()); return; }
@@ -33,18 +42,32 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     finally { if (current === version.current) setLoading(false); }
   }, [deviceId]);
   useEffect(() => {
-    setLoading(true); setMeasurements([]); setTrain([]); setSolar([]); setLastSync(null); setError('');
-    void refresh();
-    const client = getSupabase(); let timer: ReturnType<typeof setTimeout> | undefined;
-    const queueRefresh = () => { if (timer) return; timer = setTimeout(() => { timer = undefined; void refresh(); }, 350); };
-    let channel = client.channel(`telemetry-${deviceId || 'none'}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, queueRefresh);
+    setLoading(true); setMeasurements([]); setTrain([]); setSolar([]); setLastSync(null); setError(''); setRealtime('CONNECTING');
+    // `active` evita que eventos o estados tardíos del canal anterior (p. ej. CLOSED al terminar su salida)
+    // sobrescriban el estado del canal nuevo o programen consultas con el dispositivo anterior.
+    const client = getSupabase(); let timer: ReturnType<typeof setTimeout> | undefined; let active = true;
+    // Una sola consulta automática a la vez: cada refresh invalida al anterior, así que con lecturas cada
+    // segundo y una red lenta las consultas se descartaban entre sí y la vista nunca se actualizaba.
+    let running = false; let again = false;
+    const run = async () => {
+      if (!active) return; if (running) { again = true; return; }
+      running = true;
+      try { await refresh(); } finally { running = false; if (again && active) { again = false; void run(); } }
+    };
+    void run();
+    const queueRefresh = () => { if (!active || timer) return; timer = setTimeout(() => { timer = undefined; void run(); }, 350); };
+    // Tema único por suscripción: supabase-js reutiliza un canal con el mismo tema mientras aún se está cerrando,
+    // lo que dejaba la nueva suscripción sin callbacks (StrictMode o cambio rápido A → B → A).
+    let channel = client.channel(`telemetry-${deviceId || 'none'}-${++channelSequence}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, queueRefresh)
+      // `stations` es global: se escucha sin filtro de dispositivo para que un renombrado se refleje al instante.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stations' }, queueRefresh);
     if (deviceId) for (const table of ['measurements', 'train_status', 'solar_station']) {
       channel = channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `device_id=eq.${deviceId}` }, queueRefresh);
     }
-    channel.subscribe(status => { setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
-    const interval = setInterval(() => { void refresh(); }, 15000);
-    return () => { ++version.current; clearInterval(interval); clearTimeout(timer); void client.removeChannel(channel); };
+    channel.subscribe(status => { if (!active) return; setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
+    const interval = setInterval(() => { void run(); }, 15000);
+    return () => { active = false; ++version.current; clearInterval(interval); clearTimeout(timer); void client.removeChannel(channel); };
   }, [deviceId, refresh]);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
@@ -52,11 +75,12 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     const interval = setInterval(() => setNow(Date.now()), 5000);
     return () => { clearInterval(interval); window.removeEventListener('online', update); window.removeEventListener('offline', update); };
   }, []);
-  return <Context.Provider value={{ devices, deviceId, selectDevice, measurements, train, solar, loading, error, realtime, online, now, lastSync, refresh }}>{children}</Context.Provider>;
+  return <Context.Provider value={{ devices, deviceId, selectDevice, stations, measurements, train, solar, loading, error, realtime, online, now, lastSync, refresh }}>{children}</Context.Provider>;
 }
 export function useTelemetry() { const context = useContext(Context); if (!context) throw new Error('Falta TelemetryProvider'); return context; }
 export function useLiveState() {
   const f = useTelemetry(); const device = f.devices.find(d => d.id === f.deviceId);
   const receiving = Boolean(device?.enabled && fresh(device.last_seen, f.now));
-  return { device, receiving, live: receiving && f.realtime === 'SUBSCRIBED' && f.online && !f.error && fresh(f.lastSync, f.now) };
+  const link = linkState({ hasDevices: f.devices.length > 0, enabled: device?.enabled, lastSeen: device?.last_seen, receiving, error: f.error, online: f.online, staleSeconds: STALE_SECONDS });
+  return { device, receiving, link, live: receiving && f.realtime === 'SUBSCRIBED' && f.online && !f.error && fresh(f.lastSync, f.now) };
 }

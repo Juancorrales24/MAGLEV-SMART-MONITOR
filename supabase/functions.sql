@@ -19,12 +19,14 @@ begin
   values(p_device_id,p_sample_id,p_sampled_at,(p_measurements->>'voltage')::double precision,(p_measurements->>'current')::double precision,(p_measurements->>'power')::double precision,(p_measurements->>'energy')::double precision,stamp);
  end if;
  if p_train is not null then
-  insert into public.train_status(device_id,sample_id,sampled_at,levitation_height,stability,temperature,created_at)
-  values(p_device_id,p_sample_id,p_sampled_at,(p_train->>'levitation_height')::double precision,(p_train->>'stability')::double precision,(p_train->>'temperature')::double precision,stamp);
+  -- Evento de sensor infrarrojo: station_number es el número fijo del sensor por cableado (1-3) y
+  -- detected distingue llegada (true) de salida (false). Las columnas de levitación quedan nulas.
+  insert into public.train_status(device_id,sample_id,sampled_at,station_number,detected,created_at)
+  values(p_device_id,p_sample_id,p_sampled_at,(p_train->>'station_number')::smallint,(p_train->>'detected')::boolean,stamp);
  end if;
  if p_solar is not null then
-  insert into public.solar_station(device_id,sample_id,sampled_at,panel_voltage,panel_current,battery_level,power_output,created_at)
-  values(p_device_id,p_sample_id,p_sampled_at,(p_solar->>'panel_voltage')::double precision,(p_solar->>'panel_current')::double precision,(p_solar->>'battery_level')::double precision,(p_solar->>'power_output')::double precision,stamp);
+  insert into public.solar_station(device_id,sample_id,sampled_at,panel_voltage,battery_voltage,battery_level,panel_current,power_output,created_at)
+  values(p_device_id,p_sample_id,p_sampled_at,(p_solar->>'panel_voltage')::double precision,(p_solar->>'battery_voltage')::double precision,(p_solar->>'battery_level')::double precision,(p_solar->>'panel_current')::double precision,(p_solar->>'power_output')::double precision,stamp);
  end if;
  update public.devices set last_seen=stamp where id=p_device_id;
  return true;
