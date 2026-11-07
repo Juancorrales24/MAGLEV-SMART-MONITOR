@@ -1,12 +1,50 @@
 'use client';
-import { Sun, Activity, Zap, BatteryCharging } from 'lucide-react';
-import { useTelemetry } from '@/hooks/use-telemetry';
-import { PageTitle, Panel, MetricCard, BatteryIndicator, LoadingState, EmptyState } from '@/components/ui';
+import { Sun, BatteryCharging, Gauge, Antenna } from 'lucide-react';
+import { useTelemetry, useLiveState } from '@/hooks/use-telemetry';
+import { PageTitle, Panel, MetricCard, StatCard, BatteryEstimate, LoadingState, EmptyState } from '@/components/ui';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { TelemetryChart } from '@/components/TelemetryChart';
-import { ModuleVisual } from '@/components/ModuleVisual';
-import { dateTime, number } from '@/lib/format';
+import { SolarTable } from '@/components/SolarTable';
+import { dateTime, relativeAge, number, NO_DATA } from '@/lib/format';
 export default function Solar() {
-  const f = useTelemetry(); const s = f.solar[0];
-  return <><PageTitle eyebrow="SUBSISTEMA / 02" title="Estación solar" description="Generación fotovoltaica y almacenamiento de energía."/><ConnectionStatus/>{f.loading ? <LoadingState/> : <><div className="module-overview"><ModuleVisual solar/><div className="metrics-grid"><MetricCard label="Voltaje del panel" value={s?.panel_voltage} unit="V" icon={Sun}/><MetricCard label="Corriente del panel" value={s?.panel_current} unit="A" icon={Activity} accent="blue"/><MetricCard label="Potencia de salida" value={s?.power_output} unit="W" icon={Zap} accent="amber"/><MetricCard label="Carga de batería" value={s?.battery_level} unit="%" icon={BatteryCharging} accent="violet"/></div></div><div className="section-meta">Última recepción: {dateTime(s?.created_at)}</div><div className="dashboard-grid"><Panel title="Generación solar" subtitle="Últimas 240 lecturas · W"><TelemetryChart data={f.solar} field="power_output" label="Potencia solar" unit="W" color="#edbb75"/></Panel><Panel title="Almacenamiento" subtitle="Estado de carga reportado por el dispositivo"><div className="battery-feature"><BatteryIndicator value={s?.battery_level}/><p>Capacidad disponible</p><small>{s?.battery_level == null ? 'Esperando información de la batería.' : `Lectura recibida: ${dateTime(s.created_at)}`}</small></div></Panel></div><Panel title="Registros de la estación">{!f.solar.length ? <EmptyState compact/> : <div className="table-scroll"><table><thead><tr><th>Recepción</th><th>Voltaje (V)</th><th>Corriente (A)</th><th>Potencia (W)</th><th>Batería (%)</th></tr></thead><tbody>{f.solar.slice(0, 15).map(r => <tr key={r.id}><td>{dateTime(r.created_at)}</td><td>{number(r.panel_voltage)}</td><td>{number(r.panel_current)}</td><td>{number(r.power_output)}</td><td>{number(r.battery_level)}</td></tr>)}</tbody></table></div>}</Panel></>}</>;
+  const f = useTelemetry(); const { device, link } = useLiveState(); const s = f.solar[0];
+  return <>
+    <PageTitle eyebrow="SUBSISTEMA / 02" title="Estación solar" description="Voltaje del panel, voltaje de la batería y carga estimada a partir del voltaje."/>
+    <ConnectionStatus/>
+    {f.loading ? <LoadingState/> : <>
+      <div className="metrics-grid">
+          <MetricCard label="Voltaje del panel" value={s?.panel_voltage} unit="V" icon={Sun} accent="red"
+            detail={s?.panel_voltage == null ? `${NO_DATA}: sin lectura de voltaje del panel.` : `Medido ${dateTime(s.created_at)} · ${relativeAge(s.created_at, f.now)}`}/>
+          <MetricCard label="Voltaje de la batería" value={s?.battery_voltage} unit="V" icon={BatteryCharging} accent="navy"
+            detail={s?.battery_voltage == null ? `${NO_DATA}: sin lectura de voltaje de batería.` : `Medido ${dateTime(s.created_at)} · ${relativeAge(s.created_at, f.now)}`}/>
+          <MetricCard label="Carga estimada" value={s?.battery_level} unit="%" icon={Gauge} accent="navy" digits={0}
+            detail="Estimación calculada a partir del voltaje de la batería. No es una medición directa de carga."/>
+          <StatCard label="Última comunicación del ESP32" icon={Antenna} accent="navy" tone={link.ok ? 'on' : 'off'}
+            value={device?.last_seen ? relativeAge(device.last_seen, f.now) : NO_DATA}
+            detail={device?.last_seen ? `${dateTime(device.last_seen)} · ${link.label}` : link.detail}/>
+      </div>
+      <p className="section-meta">{s ? `Hora de la medición mostrada: ${dateTime(s.created_at)} (${relativeAge(s.created_at, f.now)}). No es la hora actual.` : 'Todavía no se ha recibido ninguna lectura de la estación solar.'}</p>
+      <div className="two-columns">
+        <Panel title="Voltaje del panel" subtitle="Registros reales almacenados · V"><TelemetryChart data={f.solar} field="panel_voltage" label="Voltaje del panel" unit="V" color="#D72638"/></Panel>
+        <Panel title="Voltaje de la batería" subtitle="Registros reales almacenados · V"><TelemetryChart data={f.solar} field="battery_voltage" label="Voltaje de la batería" unit="V" color="#5B8FD4"/></Panel>
+      </div>
+      <div className="two-columns">
+        <Panel title="Carga estimada de la batería" subtitle="Porcentaje estimado por voltaje · %"><TelemetryChart data={f.solar} field="battery_level" label="Carga estimada" unit="%" color="#E2E8F0" digits={0}/></Panel>
+        <Panel title="Estado de la batería" subtitle="Estimación, no medición directa de carga">
+          <div className="battery-feature">
+            {s?.battery_level == null && s?.battery_voltage == null
+              ? <EmptyState compact title="Sin datos de la batería" description="No hay lecturas de voltaje ni de carga estimada todavía."/>
+              : <>
+                <BatteryEstimate value={s?.battery_level} size="feature"/>
+                <p>Carga estimada a partir del voltaje</p>
+                <small>Voltaje de la batería: {s?.battery_voltage == null ? NO_DATA : `${number(s.battery_voltage)} V`} · Hora de la lectura: {dateTime(s?.created_at)}</small>
+              </>}
+          </div>
+        </Panel>
+      </div>
+      <Panel title="Registros de la estación solar" subtitle="Las 15 lecturas más recientes almacenadas en Supabase.">
+        <SolarTable rows={f.solar.slice(0, 15)}/>
+      </Panel>
+    </>}
+  </>;
 }
