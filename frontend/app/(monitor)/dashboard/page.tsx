@@ -1,13 +1,51 @@
 'use client';
-import { useState } from 'react';
-import { Zap, Activity, Gauge, BatteryCharging, TrainFront, Sun } from 'lucide-react';
-import { useTelemetry } from '@/hooks/use-telemetry';
-import { PageTitle, Panel, MetricCard, MiniLink, BatteryIndicator, LoadingState } from '@/components/ui';
+import { useMemo } from 'react';
+import { MapPin, Radio, Sun, BatteryCharging, Gauge, Antenna, Activity } from 'lucide-react';
+import { useTelemetry, useLiveState } from '@/hooks/use-telemetry';
+import { PageTitle, Panel, MetricCard, StatCard, StatusPill, MiniLink, LoadingState } from '@/components/ui';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
-import { TelemetryChart } from '@/components/TelemetryChart';
-import { DataTable } from '@/components/DataTable';
-import { dateTime, number } from '@/lib/format';
+import { TrainEvents } from '@/components/TrainEvents';
+import { SolarTable } from '@/components/SolarTable';
+import { activeStation, lastDetection, sensorEvents, stationName, stationViews } from '@/lib/train-state';
+import { dateTime, relativeAge, NO_DATA } from '@/lib/format';
 export default function Dashboard() {
-  const [chart, setChart] = useState<'power' | 'energy'>('energy'); const f = useTelemetry(); const m = f.measurements[0]; const t = f.train[0]; const s = f.solar[0];
-  return <><PageTitle eyebrow="CENTRO DE CONTROL" title="Vista general" description="El estado del tren y su energía, en un solo lugar."/><ConnectionStatus/>{f.loading ? <LoadingState/> : <><div className="metrics-grid"><MetricCard label="Voltaje del sistema" value={m?.voltage} unit="V" icon={Zap}/><MetricCard label="Corriente" value={m?.current} unit="A" icon={Activity} accent="blue"/><MetricCard label="Potencia" value={m?.power} unit="W" icon={Gauge} accent="amber"/><MetricCard label="Energía acumulada" value={m?.energy} unit="Wh" icon={BatteryCharging} accent="violet"/></div><div className="section-meta">Lectura eléctrica: {dateTime(m?.created_at)}</div><div className="dashboard-grid"><Panel title={chart === 'energy' ? 'Energía acumulada' : 'Potencia del sistema'} subtitle="Últimas 240 mediciones recibidas" action={<MiniLink href="/history">Ver historial</MiniLink>}><div className="chart-switch"><button aria-pressed={chart === 'energy'} onClick={() => setChart('energy')}>Energía · Wh</button><button aria-pressed={chart === 'power'} onClick={() => setChart('power')}>Potencia · W</button></div><TelemetryChart data={f.measurements} field={chart} label={chart === 'energy' ? 'Energía' : 'Potencia'} unit={chart === 'energy' ? 'Wh' : 'W'} color="#04b8ff"/></Panel><Panel title="Estado de los módulos" subtitle="Último registro de cada subsistema"><div className="subsystem"><div className="subsystem-title"><TrainFront size={23}/><h3>Tren Maglev</h3><MiniLink href="/train">Ver</MiniLink></div><dl className="stat-pairs"><div><dt>Altura de levitación</dt><dd>{number(t?.levitation_height)} <span>mm</span></dd></div><div><dt>Estabilidad reportada</dt><dd>{number(t?.stability)} <span>%</span></dd></div></dl><small>{dateTime(t?.created_at)}</small></div><div className="subsystem"><div className="subsystem-title"><Sun size={23}/><h3>Estación solar</h3><MiniLink href="/solar">Ver</MiniLink></div><BatteryIndicator value={s?.battery_level}/><small>Batería · {dateTime(s?.created_at)}</small></div></Panel></div><Panel title="Últimas mediciones" subtitle="Lecturas eléctricas del dispositivo seleccionado" action={<MiniLink href="/monitoring">Abrir monitoreo</MiniLink>}><DataTable rows={f.measurements.slice(0, 6)}/></Panel></>} </>;
+  const f = useTelemetry(); const { device, link } = useLiveState(); const s = f.solar[0];
+  const views = useMemo(() => stationViews(f.train, f.stations), [f.train, f.stations]);
+  const events = useMemo(() => sensorEvents(f.train), [f.train]);
+  const active = activeStation(views); const last = lastDetection(f.train);
+  return <>
+    <PageTitle eyebrow="CENTRO DE CONTROL" title="Vista general" description="Detección del tren por estación y energía de la estación solar."/>
+    <ConnectionStatus/>
+    {f.loading ? <LoadingState/> : <>
+      <div className="metrics-grid">
+        <StatCard label="Última estación detectada" icon={MapPin} accent="red"
+          value={last?.station_number ? stationName(f.stations, last.station_number) : NO_DATA}
+          detail={last ? `${dateTime(last.created_at)} · ${relativeAge(last.created_at, f.now)}` : 'Todavía no se ha registrado ninguna llegada.'}/>
+        <StatCard label="Estado de la detección" icon={Radio} accent="navy" tone={active ? 'on' : 'off'}
+          value={active ? 'Tren detectado' : 'Sin detección activa'}
+          detail={active ? `Sensor activo en ${active.name}.` : 'Ningún sensor reporta presencia del tren ahora mismo.'}/>
+        <MetricCard label="Voltaje del panel" value={s?.panel_voltage} unit="V" icon={Sun} accent="navy"
+          detail={s?.panel_voltage == null ? `${NO_DATA}: sin lectura del panel.` : `Medido ${dateTime(s.created_at)}`}/>
+        <MetricCard label="Voltaje de la batería" value={s?.battery_voltage} unit="V" icon={BatteryCharging} accent="navy"
+          detail={s?.battery_voltage == null ? `${NO_DATA}: sin lectura de la batería.` : `Medido ${dateTime(s.created_at)}`}/>
+      </div>
+      <div className="metrics-grid three top-gap">
+        <MetricCard label="Carga estimada de la batería" value={s?.battery_level} unit="%" icon={Gauge} accent="navy" digits={0}
+          detail="Estimación a partir del voltaje, no una medición directa de carga."/>
+        <StatCard label="Última comunicación del ESP32" icon={Antenna} accent="navy"
+          value={device?.last_seen ? dateTime(device.last_seen) : NO_DATA}
+          detail={device?.last_seen ? `${relativeAge(device.last_seen, f.now)} · hora de recepción, no la hora actual.` : 'El dispositivo todavía no ha enviado ninguna comunicación.'}/>
+        <StatCard label="Estado de comunicación" icon={Activity} accent="navy" tone={link.ok ? 'on' : 'off'}
+          value={<StatusPill state={link.key} label={link.label}/>} detail={link.detail}/>
+      </div>
+      <div className="two-columns top-gap">
+        <Panel title="Últimas detecciones" subtitle="Llegadas y salidas registradas por los sensores" action={<MiniLink href="/train">Ver vía y estaciones</MiniLink>}>
+          <TrainEvents rows={events.slice(0, 6)} stations={f.stations} devices={f.devices} showReceipt={false}/>
+        </Panel>
+        <Panel title="Mediciones solares recientes" subtitle="Voltajes almacenados en Supabase" action={<MiniLink href="/solar">Ver estación solar</MiniLink>}>
+          <SolarTable rows={f.solar.slice(0, 6)}/>
+        </Panel>
+      </div>
+    </>}
+  </>;
 }
