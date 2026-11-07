@@ -38,6 +38,17 @@ do $$ begin
   alter table public.measurements alter column created_at type timestamptz using created_at at time zone 'UTC';
  end if;
 end $$;
+-- Nombres editables de las tres estaciones físicas. El emisor manda el número fijo del sensor
+-- (station_number 1-3, por cableado), nunca el nombre: renombrar aquí no obliga a recargar el firmware.
+create table if not exists public.stations (
+ id uuid primary key default gen_random_uuid(),
+ position smallint not null unique check (position between 1 and 3),
+ name text not null check (char_length(name) between 1 and 100), created_at timestamptz not null default now()
+);
+insert into public.stations(position,name) values (1,'Estación 1'),(2,'Estación 2'),(3,'Estación 3')
+ on conflict (position) do nothing;
+-- El prototipo dejó de usar levitación: los eventos ahora son detecciones de sensores infrarrojos por estación.
+-- Las columnas de levitación se conservan para no destruir registros de la versión anterior; la interfaz no las muestra.
 create table if not exists public.train_status (
  id uuid primary key default gen_random_uuid(), device_id uuid not null references public.devices(id),
  sample_id uuid not null, sampled_at timestamptz,
@@ -45,6 +56,9 @@ create table if not exists public.train_status (
  stability double precision check (stability between 0 and 100),
  temperature double precision check (temperature between -100 and 500), created_at timestamptz not null default now()
 );
+alter table public.train_status add column if not exists station_number smallint check (station_number between 1 and 3);
+alter table public.train_status add column if not exists detected boolean;
+-- panel_current y power_output quedan por compatibilidad: no hay sensor de corriente (ni INA219) en el prototipo.
 create table if not exists public.solar_station (
  id uuid primary key default gen_random_uuid(), device_id uuid not null references public.devices(id),
  sample_id uuid not null, sampled_at timestamptz,
@@ -53,12 +67,15 @@ create table if not exists public.solar_station (
  battery_level double precision check (battery_level between 0 and 100),
  power_output double precision check (power_output between -100000000 and 100000000), created_at timestamptz not null default now()
 );
+alter table public.solar_station add column if not exists battery_voltage double precision check (battery_voltage between 0 and 10000);
 create unique index if not exists measurements_sample on public.measurements(device_id,sample_id);
 create unique index if not exists train_sample on public.train_status(device_id,sample_id);
 create unique index if not exists solar_sample on public.solar_station(device_id,sample_id);
 create index if not exists measurements_recent on public.measurements(device_id,created_at desc,id desc);
 create index if not exists measurements_history on public.measurements(created_at desc,id desc);
 create index if not exists train_recent on public.train_status(device_id,created_at desc,id desc);
+-- Historial por estación: la vista ferroviaria filtra detecciones de una estación concreta.
+create index if not exists train_station on public.train_status(station_number,created_at desc,id desc);
 create index if not exists solar_recent on public.solar_station(device_id,created_at desc,id desc);
 create index if not exists receipts_created on public.ingest_receipts(created_at);
 create or replace function public.handle_maglev_user() returns trigger language plpgsql security definer set search_path='' as $$
@@ -78,9 +95,10 @@ alter table public.devices enable row level security;
 alter table public.device_credentials enable row level security;
 alter table public.ingest_receipts enable row level security;
 alter table public.measurements enable row level security;
+alter table public.stations enable row level security;
 alter table public.train_status enable row level security;
 alter table public.solar_station enable row level security;
-revoke all on public.profiles,public.devices,public.device_credentials,public.ingest_receipts,public.measurements,public.train_status,public.solar_station from anon,authenticated;
-grant all on public.profiles,public.devices,public.device_credentials,public.ingest_receipts,public.measurements,public.train_status,public.solar_station to service_role;
+revoke all on public.profiles,public.devices,public.device_credentials,public.ingest_receipts,public.measurements,public.stations,public.train_status,public.solar_station from anon,authenticated;
+grant all on public.profiles,public.devices,public.device_credentials,public.ingest_receipts,public.measurements,public.stations,public.train_status,public.solar_station to service_role;
 revoke all on function public.handle_maglev_user() from public,anon,authenticated;
 commit;

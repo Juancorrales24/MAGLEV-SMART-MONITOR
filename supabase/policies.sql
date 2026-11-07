@@ -14,13 +14,16 @@ create or replace function private.maglev_admin() returns boolean language sql s
 $$;
 revoke all on function private.maglev_active(), private.maglev_admin() from public,anon;
 grant execute on function private.maglev_active(), private.maglev_admin() to authenticated;
-grant select on public.profiles,public.devices,public.measurements,public.train_status,public.solar_station to authenticated;
+grant select on public.profiles,public.devices,public.measurements,public.stations,public.train_status,public.solar_station to authenticated;
 drop policy if exists maglev_profile_read on public.profiles;
 create policy maglev_profile_read on public.profiles for select to authenticated using(id=(select auth.uid()) or (select private.maglev_admin()));
 drop policy if exists maglev_device_read on public.devices;
 create policy maglev_device_read on public.devices for select to authenticated using((select private.maglev_active()));
 drop policy if exists maglev_measurements_read on public.measurements;
 create policy maglev_measurements_read on public.measurements for select to authenticated using((select private.maglev_active()));
+drop policy if exists maglev_stations_read on public.stations;
+create policy maglev_stations_read on public.stations for select to authenticated using((select private.maglev_active()));
+-- Renombrar estaciones pasa por la API administrativa (service_role), igual que los dispositivos.
 drop policy if exists maglev_train_read on public.train_status;
 create policy maglev_train_read on public.train_status for select to authenticated using((select private.maglev_active()));
 drop policy if exists maglev_solar_read on public.solar_station;
