@@ -1,6 +1,7 @@
-/* MAGLEV: transporte de lecturas reales recibidas como JSON por Serial.
- * No genera ni simula mediciones. El código del sensor debe producir los bloques
- * definidos en documentation/Integracion_ESP32.md. Core Arduino ESP32 + ArduinoJson 7.
+/* MAGLEV: transporte de lecturas reales. El panel solar y la bateria se miden
+ * localmente por ADC (divisor resistivo en PIN_PANEL/PIN_BATERIA); otros bloques
+ * (measurements) se reciben como JSON por Serial, con el mismo formato definido
+ * en documentation/Integracion_ESP32.md. Core Arduino ESP32 + ArduinoJson 7.
  */
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -14,6 +15,39 @@ String inputLine, pendingPayload;
 bool discarding = false;
 unsigned long lastSend = 0, lastWifi = 0;
 unsigned long retryMs = 2000;
+
+// --- Sensor solar: panel fotovoltaico y bateria de litio (divisor resistivo en PIN_PANEL/PIN_BATERIA) ---
+const int PIN_PANEL = 34;
+const int PIN_BATERIA = 35;
+const float R1 = 100000.0;
+const float R2 = 47000.0;
+const float FACTOR_DIVISOR = (R1 + R2) / R2;
+float CAL_PANEL = 1.0;
+float CAL_BATERIA = 1.0;
+const unsigned long SAMPLE_INTERVAL_MS = 5000;
+unsigned long lastSample = 0;
+
+float leerVoltaje(int pin, float calibracion) {
+  uint32_t suma = 0;
+  for (int i = 0; i < 20; i++) { suma += analogReadMilliVolts(pin); delay(2); }
+  float voltajeADC = (suma / 20.0) / 1000.0;
+  return voltajeADC * FACTOR_DIVISOR * calibracion;
+}
+
+// Curva aproximada de descarga de una celda Li-ion en reposo (solar_station.battery_level, 0-100%).
+int porcentajeBateria(float v) {
+  const float voltajes[] = {3.00, 3.30, 3.50, 3.60, 3.70, 3.75, 3.80, 3.85, 3.90, 4.00, 4.10, 4.20};
+  const int porcentajes[] = {0, 5, 10, 15, 20, 30, 40, 50, 60, 75, 90, 100};
+  if (v <= voltajes[0]) return 0;
+  if (v >= voltajes[11]) return 100;
+  for (int i = 0; i < 11; i++) {
+    if (v <= voltajes[i + 1]) {
+      float f = (v - voltajes[i]) / (voltajes[i + 1] - voltajes[i]);
+      return round(porcentajes[i] + f * (porcentajes[i + 1] - porcentajes[i]));
+    }
+  }
+  return 0;
+}
 
 String newSampleId() {
   uint8_t b[16]; esp_fill_random(b, sizeof(b));
@@ -32,6 +66,17 @@ void dropNullMembers(JsonObject obj) {
     for (JsonObject::iterator it = obj.begin(); it != obj.end(); ++it)
       if (it->value().isNull()) { obj.remove(it); removed = true; break; }
   }
+}
+
+void sampleSolarStation() {
+  float panel = leerVoltaje(PIN_PANEL, CAL_PANEL);
+  float bateria = leerVoltaje(PIN_BATERIA, CAL_BATERIA);
+  int porcentaje = porcentajeBateria(bateria);
+  JsonDocument doc;
+  doc["solar_station"]["panel_voltage"] = panel;
+  doc["solar_station"]["battery_level"] = porcentaje;
+  String line; serializeJson(doc, line);
+  acceptSensorLine(line);
 }
 
 void acceptSensorLine(const String& line) {
@@ -64,7 +109,10 @@ void setup() {
   }
   WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   configTime(0, 0, "pool.ntp.org", "time.google.com");
-  Serial.println("Esperando lecturas JSON reales por Serial, una por linea.");
+  analogReadResolution(12);
+  analogSetPinAttenuation(PIN_PANEL, ADC_11db);
+  analogSetPinAttenuation(PIN_BATERIA, ADC_11db);
+  Serial.println("Midiendo panel solar y bateria localmente; tambien acepta lecturas JSON por Serial.");
 }
 
 void loop() {
@@ -80,6 +128,10 @@ void loop() {
       if (inputLine.length() >= 2048) { inputLine = ""; discarding = true; Serial.println("ERROR: linea mayor de 2048 bytes."); }
       else inputLine += c;
     }
+  }
+  if (pendingPayload.isEmpty() && now - lastSample >= SAMPLE_INTERVAL_MS) {
+    lastSample = now;
+    sampleSolarStation();
   }
   if (pendingPayload.isEmpty() || WiFi.status() != WL_CONNECTED || now - lastSend < retryMs) { delay(5); return; }
   // TLS requiere hora válida para comprobar la vigencia del certificado.
