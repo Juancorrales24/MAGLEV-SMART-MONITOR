@@ -1,5 +1,8 @@
 #pragma once
 // Copiar este archivo como config.h y completar localmente. No compartir config.h.
+// Aqui no van claves de Supabase: el ESP32 solo conoce su DEVICE_ID y su DEVICE_TOKEN.
+
+// === Red y API ==============================================================
 const char* WIFI_SSID = "";
 const char* WIFI_PASSWORD = "";
 const char* API_URL = "https://TU_DOMINIO/api/ingest";
@@ -8,3 +11,98 @@ const char* DEVICE_TOKEN = "";
 // Certificado CA raíz PEM del dominio HTTPS de API_URL. No usar setInsecure().
 const char* ROOT_CA = R"PEM(
 )PEM";
+
+#define WIFI_REINTENTO_MS   10000UL  // espera entre intentos de WiFi.reconnect()
+#define TLS_HANDSHAKE_S     10       // segundos de tope para el handshake TLS
+#define HTTP_TIMEOUT_MS     8000     // tope de conexión y de respuesta del POST
+
+// === Ritmo de envío y cola de mensajes ======================================
+// La API acepta como máximo 1 mensaje NUEVO por segundo y por dispositivo (429 si
+// no). Se deja margen porque el reloj del ESP32 y el del servidor no coinciden.
+#define INTERVALO_MIN_ENVIO_MS 1200UL
+#define INTERVALO_429_MS       1500UL  // espera fija tras un 429 (el mensaje sigue siendo válido)
+#define REINTENTO_MAX_MS       60000UL // tope del backoff exponencial ante 5xx o error de red
+
+// Cola FIFO en RAM estática: COLA_RANURAS x COLA_BYTES_POR_RANURA ≈ 6,2 KiB con los
+// valores por defecto (16 x 384 B). A 1 mensaje/s cubre ~16 s de atasco de red.
+// Un mensaje de evento ocupa ~100 B y uno solar ~150 B, así que 384 B sobran.
+// Si se sube COLA_RANURAS, comprobar el heap libre: WiFi + handshake TLS ya gastan
+// bastante y quedarse sin memoria impide enviar nada.
+#define COLA_RANURAS            16
+#define COLA_BYTES_POR_RANURA   384
+// Las muestras solares son periódicas (la siguiente sustituye a la anterior), así
+// que no deben llenar la cola durante un corte de red y dejar sin sitio a los
+// eventos de tren, que son irrepetibles.
+#define COLA_MAX_SOLAR_EN_ESPERA 3
+
+// Entrada JSON por Serial (bloques que no mide el ESP32, p. ej. measurements).
+#define SERIAL_MAX_LINEA        288  // debe dejar hueco para el sample_id (~51 B) en la ranura
+#define SERIAL_BYTES_POR_VUELTA 256  // bytes leídos como máximo en cada vuelta de loop()
+
+// === Sensores infrarrojos (uno por estación) ================================
+// PENDIENTE DE CONFIRMAR CON EL CIRCUITO FÍSICO: el cableado definitivo todavía no
+// está decidido. El índice del array es la estación: pin 1 -> station_number 1, etc.
+// Evitar GPIO 6-11 (flash SPI), GPIO 0/2/12/15 (strapping de arranque) y
+// GPIO 34-39 (solo entrada, sin pull-up interno). GPIO 34 y 35 ya los usa el ADC
+// solar, y GPIO 21/22 los usa la LCD por I2C.
+#define IR_PIN_ESTACION_1 25
+#define IR_PIN_ESTACION_2 26
+#define IR_PIN_ESTACION_3 27
+
+// Modo de la entrada. INPUT sirve para los módulos IR con salida digital tipo
+// comparador (FC-51, TCRT5000 con placa), que empujan el nivel activamente.
+// Usar INPUT_PULLUP si la salida es de colector abierto o es un fototransistor
+// desnudo. PENDIENTE DE CONFIRMAR con el módulo real.
+#define IR_MODO_ENTRADA INPUT
+
+// Nivel activo de cada sensor: muchos módulos IR entregan LOW al detectar, pero no
+// todos. Se configura por estación para admitir módulos distintos en el mismo tren.
+// PENDIENTE DE CONFIRMAR midiendo la salida de cada sensor con y sin obstáculo.
+const bool IR_ACTIVO_EN_BAJO[3] = { true, true, true };
+
+// Antirrebote: el nivel debe mantenerse estable este tiempo antes de dar la
+// transición por buena. Filtra el ruido eléctrico del cableado y los rebotes del
+// comparador. Contrapartida real: una presencia o una ausencia MÁS CORTA que este
+// valor no se notifica, así que es el límite inferior del paso del tren por el
+// sensor. Subirlo si aparecen detecciones falsas; bajarlo si el tren pasa tan
+// rápido que se pierden eventos. PENDIENTE DE AJUSTAR CON EL TREN EN MARCHA.
+#define IR_ANTIRREBOTE_MS 20UL
+
+// === Estación solar: panel y batería por ADC ================================
+// Divisor resistivo en cada entrada; ambos pines son solo-entrada del ADC1, que es
+// el único que funciona con el WiFi encendido.
+#define PIN_PANEL   34
+#define PIN_BATERIA 35
+#define DIVISOR_R1_OHM 100000.0f  // resistencia superior del divisor
+#define DIVISOR_R2_OHM 47000.0f   // resistencia inferior (en paralelo con la entrada del ADC)
+
+// Factores de corrección del voltaje medido: 1.0 = sin corregir. PENDIENTE DE
+// CALIBRAR comparando la lectura con un multímetro y ajustando el cociente
+// (voltaje_real / voltaje_medido). La tolerancia de las resistencias y la
+// no linealidad del ADC del ESP32 hacen que casi nunca salga 1.0 exacto.
+#define CAL_PANEL   1.0f
+#define CAL_BATERIA 1.0f
+
+#define ADC_MUESTRAS              16   // lecturas que se promedian por medida
+#define ADC_MICROS_ENTRE_MUESTRAS  200 // µs entre lecturas; el total bloquea loop()
+#define SOLAR_INTERVALO_MS      5000UL // cada cuánto se envía una muestra solar
+
+// === Pantalla LCD 1602 por I2C ==============================================
+// 1 = usar la pantalla; 0 = compilar sin ella (si la biblioteca
+// "LiquidCrystal I2C" de Frank de Brabander no está instalada). Ver esp32/README.md.
+#define LCD_ENABLED 1
+
+// Dirección I2C del adaptador PCF8574 de la pantalla. Lo habitual es 0x27 o 0x3F,
+// pero NO se puede saber cuál sin probar el módulo: si nadie responde, el firmware
+// escanea el bus y lista por Serial las direcciones que encuentra para ajustar esto.
+#define LCD_DIRECCION_I2C 0x27
+
+// Pines del bus I2C. 21/22 son los que usa Wire por defecto en el ESP32.
+// PENDIENTE DE CONFIRMAR CON EL CIRCUITO FÍSICO.
+#define LCD_PIN_SDA 21
+#define LCD_PIN_SCL 22
+
+// Tiempos de la pantalla, para que se pueda leer y no parpadee.
+#define LCD_MS_MINIMO_EVENTO    1200UL // un evento nuevo espera a que el anterior se haya leído
+#define LCD_MS_RETENER_EVENTO   2500UL // cuánto se mantiene el evento antes de volver al estado
+#define LCD_MS_REFRESCO_ESTADO  2000UL // ritmo máximo de refresco de la pantalla de estado
