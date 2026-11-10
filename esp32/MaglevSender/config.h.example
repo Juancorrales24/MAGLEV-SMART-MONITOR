@@ -39,10 +39,8 @@ const char* ROOT_CA = R"PEM(
 // bastante y quedarse sin memoria impide enviar nada.
 #define COLA_RANURAS            16
 #define COLA_BYTES_POR_RANURA   384
-// Las muestras solares son periódicas (la siguiente sustituye a la anterior), así
-// que no deben llenar la cola durante un corte de red y dejar sin sitio a los
-// eventos de tren, que son irrepetibles.
-#define COLA_MAX_SOLAR_EN_ESPERA 3
+// Las muestras solares no ocupan la cola cuando hay mensajes esperando: la última
+// viaja dentro del siguiente evento de tren (ver esp32/README.md).
 
 // Entrada JSON por Serial (bloques que no mide el ESP32, p. ej. measurements).
 #define SERIAL_MAX_LINEA        288  // debe dejar hueco para el sample_id (~51 B) en la ranura
@@ -75,6 +73,12 @@ const bool IR_ACTIVO_EN_BAJO[3] = { true, true, true };
 // sensor. Subirlo si aparecen detecciones falsas; bajarlo si el tren pasa tan
 // rápido que se pierden eventos. PENDIENTE DE AJUSTAR CON EL TREN EN MARCHA.
 #define IR_ANTIRREBOTE_MS 20UL
+
+// La SALIDA solo se da por buena tras este tiempo sin presencia. Evita que un mismo
+// paso del tren se registre como dos (medido en la estación 2: dos pulsos separados
+// por ~80 ms en cada vuelta). Contrapartida: la salida se notifica este tiempo más
+// tarde y dos pasos separados por menos se verían como uno.
+#define IR_SALIDA_ESTABLE_MS 250UL
 
 // === Estación solar: panel y batería por ADC ================================
 // Divisor resistivo en cada entrada; ambos pines son solo-entrada del ADC1, que es

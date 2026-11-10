@@ -32,6 +32,11 @@
 #error "config.h esta desactualizado: vuelve a copiarlo de config.h.example y rellena tus datos."
 #endif
 
+// Valor por defecto para un config.h anterior a esta constante (ver config.h.example).
+#ifndef IR_SALIDA_ESTABLE_MS
+#define IR_SALIDA_ESTABLE_MS 250UL
+#endif
+
 #if LCD_ENABLED
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -68,11 +73,27 @@ SemaphoreHandle_t colaMutex = nullptr;
 TaskHandle_t tareaRedHandle = nullptr;
 unsigned long ultimoEnvio = 0;
 unsigned long reintentoMs = INTERVALO_MIN_ENVIO_MS;
+// Conexion HTTPS PERSISTENTE (keep-alive). Antes se creaba un cliente TLS nuevo por
+// mensaje y el handshake (~1 s en el ESP32) dominaba el envio: medido con el tren en
+// marcha, ~1,6 s por mensaje, menos de lo que el tren genera, y la cola se llenaba.
+// Ahora el handshake se paga una vez y la conexion se reutiliza. Ambos objetos deben
+// vivir fuera de la funcion de envio: el destructor de HTTPClient cierra el socket.
+// Solo los toca tareaRed (nucleo 0).
+WiFiClientSecure tlsCliente;
+HTTPClient httpCliente;
+bool tlsConfigurado = false;
+char ultimoTlsError[128] = "";
 
 // Ultimas lecturas solares, para la LCD. solarValido evita mostrar ceros inventados.
 float ultimoPanel = 0.0f, ultimaBateria = 0.0f;
 int ultimoPorcentaje = 0;
 bool solarValido = false;
+// Muestra solar tomada con la cola ocupada: no gasta un envio propio, viaja dentro
+// del siguiente evento de tren (la API admite ambos bloques en un mismo mensaje).
+// Solo la usa loop() (nucleo 1).
+bool solarPendiente = false;
+float solarPendPanel = 0.0f, solarPendBateria = 0.0f;
+int solarPendNivel = 0;
 
 // ---------------------------------------------------------------------------
 // Cola FIFO de mensajes pendientes
@@ -89,15 +110,7 @@ enum ClaseMensaje : uint8_t { CLASE_TREN = 0, CLASE_SOLAR = 1, CLASE_SERIAL = 2 
 struct Ranura { char json[COLA_BYTES_POR_RANURA]; uint8_t clase; };
 Ranura cola[COLA_RANURAS];
 uint16_t colaInicio = 0, colaUsadas = 0;
-unsigned long colaDescartados = 0, colaSolarOmitidas = 0;
-bool avisoSolarEmitido = false;
-
-uint16_t colaSolaresEnEspera() {
-  uint16_t n = 0;
-  for (uint16_t i = 0; i < colaUsadas; i++)
-    if (cola[(colaInicio + i) % COLA_RANURAS].clase == CLASE_SOLAR) n++;
-  return n;
-}
+unsigned long colaDescartados = 0;
 
 void colaQuitarFrente() {
   if (!colaUsadas) return;
@@ -123,20 +136,6 @@ bool colaEmpujar(const char* json, uint8_t clase) {
     return false;
   }
   xSemaphoreTake(colaMutex, portMAX_DELAY);
-  // Las muestras solares son periodicas y la siguiente sustituye a la anterior:
-  // se limita su acumulacion para que un corte de red no llene la cola y deje
-  // sin sitio a los eventos de tren, que son irrepetibles.
-  if (clase == CLASE_SOLAR && colaSolaresEnEspera() >= COLA_MAX_SOLAR_EN_ESPERA) {
-    colaSolarOmitidas++;
-    if (!avisoSolarEmitido) {
-      avisoSolarEmitido = true;
-      Serial.printf("COLA: ya hay %u muestras solares en espera; se omiten las nuevas "
-                    "hasta vaciar (omitidas en total: %lu).\n",
-                    (unsigned)COLA_MAX_SOLAR_EN_ESPERA, colaSolarOmitidas);
-    }
-    xSemaphoreGive(colaMutex);
-    return false;
-  }
   if (colaUsadas >= COLA_RANURAS) {
     // Se prefiere perder lo mas antiguo antes que rechazar una deteccion nueva.
     // Riesgo real: puede desaparecer una llegada y sobrevivir su salida, de modo
@@ -152,7 +151,6 @@ bool colaEmpujar(const char* json, uint8_t clase) {
   memcpy(cola[destino].json, json, len + 1);
   cola[destino].clase = clase;
   colaUsadas++;
-  if (clase == CLASE_SOLAR) avisoSolarEmitido = false;
   xSemaphoreGive(colaMutex);
   return true;
 }
@@ -177,6 +175,16 @@ void dropNullMembers(JsonObject obj) {
     for (JsonObject::iterator it = obj.begin(); it != obj.end(); ++it)
       if (it->value().isNull()) { obj.remove(it); removed = true; break; }
   }
+}
+
+void agregarBloqueSolar(JsonDocument& doc, float panel, float bateria, int nivel) {
+  JsonObject s = doc["solar_station"].to<JsonObject>();
+  s["panel_voltage"] = panel;
+  s["battery_voltage"] = bateria;
+  // battery_level es una ESTIMACION a partir del voltaje en reposo, no una medida
+  // directa de la carga: la curva Li-ion se desplaza con la corriente y la temperatura.
+  s["battery_level"] = nivel;
+  // panel_current y power_output se omiten a proposito: no hay sensor de corriente.
 }
 
 // Asigna el sample_id definitivo, serializa y encola. El sample_id se fija AQUI y
@@ -284,7 +292,7 @@ const int IR_PINS[IR_ESTACIONES] = { IR_PIN_ESTACION_1, IR_PIN_ESTACION_2, IR_PI
 
 // La ISR solo deja constancia del ultimo flanco: nivel, instante y numero de flancos.
 // Sirve para recuperar el instante REAL de una transicion ocurrida mientras loop()
-// estaba bloqueado dentro de un POST (HTTPClient es bloqueante).
+// estaba ocupado (lectura ADC, LCD, Serial). El POST ya no lo bloquea: va en tareaRed.
 portMUX_TYPE irMux = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t irFlancoMs[IR_ESTACIONES];
 volatile uint8_t irFlancoNivel[IR_ESTACIONES];
@@ -354,6 +362,11 @@ void registrarTransicion(uint8_t i, bool presencia, unsigned long instanteMs) {
   JsonObject ts = doc["train_status"].to<JsonObject>();
   ts["station_number"] = (int)(i + 1);
   ts["detected"] = presencia;
+  if (solarPendiente) {
+    // La ultima muestra solar aplazada viaja en este mismo mensaje: un envio menos.
+    agregarBloqueSolar(doc, solarPendPanel, solarPendBateria, solarPendNivel);
+    solarPendiente = false;
+  }
   encolarDocumento(doc, CLASE_TREN);
 }
 
@@ -381,18 +394,24 @@ void revisarSensoresIR(unsigned long ahora) {
           (unsigned long)(ahora - irUltimoAvisoMs[i]) >= IR_MS_ENTRE_AVISOS) {
         irUltimoAvisoMs[i] = ahora;
         Serial.printf("AVISO IR: %u flancos en estacion %u sin cambio neto de estado; "
-                      "puede ser ruido del cableado o un paso completo no visto "
-                      "(loop() bloqueado en un POST).\n",
+                      "puede ser ruido del cableado o un pulso mas corto que una "
+                      "vuelta de loop() (p. ej. ocupado escribiendo por Serial).\n",
                       (unsigned)nuevos, (unsigned)(i + 1));
       }
     }
 
     if (presenciaAhora != irCrudo[i]) { irCrudo[i] = presenciaAhora; irCrudoDesde[i] = instante; }
-    // Antirrebote: el nivel debe mantenerse IR_ANTIRREBOTE_MS antes de darse por bueno.
-    // Efecto colateral asumido: una presencia o ausencia mas corta que ese tiempo
-    // no se notifica. Las restas se hacen siempre sobre unsigned long.
+    // Antirrebote asimetrico. La LLEGADA se confirma tras IR_ANTIRREBOTE_MS; la SALIDA
+    // exige IR_SALIDA_ESTABLE_MS sin presencia. Medido con el tren en marcha: la
+    // estacion 2 veia el mismo paso como dos pulsos (72 ms, hueco de ~80 ms, 190 ms)
+    // en TODAS las vueltas, es decir, dos llegadas por cada paso real. Con el filtro,
+    // un hueco mas corto que IR_SALIDA_ESTABLE_MS no parte el paso en dos.
+    // Efectos asumidos: una presencia mas corta que IR_ANTIRREBOTE_MS no se notifica,
+    // la salida se notifica IR_SALIDA_ESTABLE_MS tarde (su instante registrado sigue
+    // siendo el real) y dos pasos separados por menos de ese tiempo se verian como uno.
+    const unsigned long estableMs = presenciaAhora ? IR_ANTIRREBOTE_MS : IR_SALIDA_ESTABLE_MS;
     if (presenciaAhora != irEstable[i] &&
-        (unsigned long)(ahora - irCrudoDesde[i]) >= IR_ANTIRREBOTE_MS) {
+        (unsigned long)(ahora - irCrudoDesde[i]) >= estableMs) {
       irEstable[i] = presenciaAhora;
       registrarTransicion(i, presenciaAhora, irCrudoDesde[i]);
     }
@@ -496,14 +515,21 @@ void sampleSolarStation() {
                 "Heap libre %u B, mayor bloque %u B.\n",
                 panel, bateria, porcentaje,
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  // Con mensajes esperando, la muestra no se encola: los eventos de tren son
+  // irrepetibles y la solar es periodica. Queda como "pendiente" y sale dentro del
+  // siguiente evento de tren; si antes llega otra muestra, la sustituye. Con la cola
+  // vacia (tren parado o red al dia) se envia sola, como siempre.
+  xSemaphoreTake(colaMutex, portMAX_DELAY);
+  const bool colaOcupada = colaUsadas > 0;
+  xSemaphoreGive(colaMutex);
+  if (colaOcupada) {
+    solarPendPanel = panel; solarPendBateria = bateria; solarPendNivel = porcentaje;
+    solarPendiente = true;
+    return;
+  }
+  solarPendiente = false;
   JsonDocument doc;
-  JsonObject s = doc["solar_station"].to<JsonObject>();
-  s["panel_voltage"] = panel;
-  s["battery_voltage"] = bateria;
-  // battery_level es una ESTIMACION a partir del voltaje en reposo, no una medida
-  // directa de la carga: la curva Li-ion se desplaza con la corriente y la temperatura.
-  s["battery_level"] = porcentaje;
-  // panel_current y power_output se omiten a proposito: no hay sensor de corriente.
+  agregarBloqueSolar(doc, panel, bateria, porcentaje);
   encolarDocumento(doc, CLASE_SOLAR);
 }
 
@@ -664,33 +690,57 @@ void leerSerial() {
 // ---------------------------------------------------------------------------
 // Envio HTTPS del frente de la cola — corre en tareaRed (nucleo 0), nunca en loop().
 // ---------------------------------------------------------------------------
+// Un POST sobre la conexion persistente. Devuelve el codigo HTTP (o el negativo de
+// HTTPClient) e indica si iba sobre una conexion ya abierta. Ante un error de red
+// cierra el socket, para que el siguiente intento empiece con un handshake limpio.
+int postTelemetria(const char* mensaje, bool& reutilizada) {
+  if (!tlsConfigurado) {
+    tlsCliente.setCACert(ROOT_CA); // verificacion TLS real: nunca setInsecure()
+    tlsCliente.setHandshakeTimeout(TLS_HANDSHAKE_S); // segundos
+    httpCliente.setReuse(true);
+    tlsConfigurado = true;
+  }
+  reutilizada = tlsCliente.connected();
+  httpCliente.setConnectTimeout(HTTP_TIMEOUT_MS);
+  httpCliente.setTimeout(HTTP_TIMEOUT_MS);
+  if (!httpCliente.begin(tlsCliente, API_URL)) return 0;
+  httpCliente.addHeader("Content-Type", "application/json");
+  httpCliente.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
+  httpCliente.addHeader("X-Device-Id", DEVICE_ID);
+  const int code = httpCliente.POST(String(mensaje));
+  // Leer el cuerpo (pocos bytes) deja la conexion limpia para el siguiente mensaje.
+  if (code > 0) httpCliente.getString();
+  httpCliente.end(); // con keep-alive no cierra el socket; solo limpia la peticion
+  if (code < 0) {
+    ultimoTlsError[0] = '\0';
+    tlsCliente.lastError(ultimoTlsError, sizeof(ultimoTlsError));
+    tlsCliente.stop();
+  }
+  return code;
+}
+
 void enviarFrenteDeCola() {
-  // Copiar el mensaje del frente bajo mutex: el handshake TLS y el POST en si (hasta
-  // ~18 s) no necesitan tener la cola bloqueada, y loop() sigue pudiendo encolar
-  // mientras tanto.
+  // Copiar el mensaje del frente bajo mutex: el POST (y el handshake TLS cuando toca
+  // abrir conexion) no necesitan tener la cola bloqueada, y loop() sigue pudiendo
+  // encolar mientras tanto.
   char mensaje[COLA_BYTES_POR_RANURA];
   xSemaphoreTake(colaMutex, portMAX_DELAY);
   snprintf(mensaje, sizeof(mensaje), "%s", cola[colaInicio].json);
   xSemaphoreGive(colaMutex);
 
-  WiFiClientSecure tls;
-  tls.setCACert(ROOT_CA); // verificacion TLS real: nunca setInsecure()
-  tls.setHandshakeTimeout(TLS_HANDSHAKE_S); // segundos
-  HTTPClient http;
-  http.setConnectTimeout(HTTP_TIMEOUT_MS);
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(tls, API_URL)) {
-    ultimoEnvio = millis(); aplicarBackoff();
-    Serial.println("REINTENTO: no se pudo iniciar la conexion HTTPS.");
-    return;
+  bool reutilizada = false;
+  int code = postTelemetria(mensaje, reutilizada);
+  if (code < 0 && reutilizada) {
+    // El servidor o el router cerraron la conexion mientras estaba en reposo: es lo
+    // normal en keep-alive y no indica un fallo de red. Se reintenta UNA vez, ya con
+    // conexion nueva. Es seguro: el sample_id es el mismo, asi que si el primer
+    // intento si llego, la API responde 200 (duplicada) y no registra dos veces.
+    Serial.printf("RED: la conexion reutilizada se habia cerrado (%d, %s); se abre otra.\n",
+                  code, httpCliente.errorToString(code).c_str());
+    code = postTelemetria(mensaje, reutilizada);
   }
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
-  http.addHeader("X-Device-Id", DEVICE_ID);
-  const int code = http.POST(String(mensaje));
   ultimoHttpCodigo = code;
   if (code == 200 || code == 201) ultimoHttpCorrectoMs = millis();
-  http.end();
   // El limite de INTERVALO_MIN_ENVIO_MS se mide desde que TERMINA el POST: mas conservador que
   // la ventana del servidor, que la mide entre mensajes aceptados.
   ultimoEnvio = millis();
@@ -716,17 +766,19 @@ void enviarFrenteDeCola() {
     colaQuitarFrente();
     xSemaphoreGive(colaMutex);
     reintentoMs = INTERVALO_MIN_ENVIO_MS;
+  } else if (code == 0) {
+    Serial.println("REINTENTO: no se pudo iniciar la conexion HTTPS.");
+    aplicarBackoff();
   } else {
     // 5xx o error de red (codigo negativo de HTTPClient): se conserva el sample_id,
     // asi que un reintento tras una respuesta perdida da 200 y no duplica el registro.
     // Diagnostico: un codigo negativo no dice POR QUE fallo (DNS, TLS, red); se
     // imprime el texto de HTTPClient y, si hubo intento de TLS, el ultimo error de
     // mbedTLS para distinguir "no hay ruta a Internet" de "certificado rechazado".
-    char tlsErr[128] = "";
-    tls.lastError(tlsErr, sizeof(tlsErr));
+    const char* tlsErr = code < 0 ? ultimoTlsError : "";
     Serial.printf("REINTENTO HTTP %d (%s)%s%s: se conserva el sample_id (%u en cola). "
                   "IP local %s, gateway %s, DNS %s, RSSI %d dBm. Heap libre %u B, mayor bloque %u B.\n",
-                  code, http.errorToString(code).c_str(),
+                  code, httpCliente.errorToString(code).c_str(),
                   tlsErr[0] ? " | TLS: " : "", tlsErr,
                   (unsigned)colaUsadas,
                   WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),

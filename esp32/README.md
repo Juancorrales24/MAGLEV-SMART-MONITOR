@@ -71,6 +71,14 @@ detecta con tres sensores infrarrojos, uno por estación.
   presencia o una ausencia más corta que ese tiempo no se notifica, así que ese valor
   es el límite inferior del paso del tren por el sensor. Hay que ajustarlo con el tren
   en marcha.
+- El antirrebote es **asimétrico**: la llegada se confirma tras `IR_ANTIRREBOTE_MS`, pero
+  la salida exige `IR_SALIDA_ESTABLE_MS` (250 ms) sin presencia. Motivo, medido con el
+  tren dando vueltas: la estación 2 veía cada paso como **dos pulsos** (72 ms, hueco de
+  ~80 ms, 190 ms) en todas las vueltas, es decir, dos llegadas y dos salidas por un
+  único paso real. Con el filtro, un hueco más corto que ese tiempo no parte el paso en
+  dos. **Contrapartidas:** la salida se notifica 250 ms tarde (el instante que se
+  registra sigue siendo el real) y dos pasos separados por menos de 250 ms se verían
+  como uno, algo imposible con una vuelta de ~13 s.
 - El **nivel activo** es configurable por estación (`IR_ACTIVO_EN_BAJO`): muchos
   módulos IR entregan `LOW` al detectar, pero no todos, y no se asume ninguno.
 - **Dos sensores activos a la vez** funcionan: cada estación tiene su propio estado y
@@ -104,9 +112,12 @@ detecta con tres sensores infrarrojos, uno por estación.
   Un 429 se reintenta con espera fija; un 5xx o un error de red,
   con backoff exponencial hasta 60 s; un 4xx definitivo (400, 401, 403, 413, 415)
   descarta el mensaje **informándolo por Serial**.
-- Las muestras solares se limitan a `COLA_MAX_SOLAR_EN_ESPERA` (3) en espera: son
-  periódicas y la siguiente sustituye a la anterior, así que un corte de red no debe
-  llenar la cola y dejar sin sitio a los eventos de tren, que son irrepetibles.
+- Las muestras solares **no compiten** con los eventos de tren: si al tomar una hay
+  mensajes esperando, no se encola; queda como "pendiente" y viaja dentro del siguiente
+  evento de tren (la API admite `train_status` y `solar_station` en el mismo mensaje).
+  Si antes llega otra muestra, la sustituye. Con la cola vacía se envía sola, como
+  siempre. Así un corte de red o una ráfaga de detecciones no llena la cola de muestras
+  periódicas ni retrasa los eventos de tren, que son irrepetibles.
 - Si la cola se llena de eventos de tren, se descarta **el más antiguo** para no perder
   la detección nueva, y se imprime por Serial el mensaje descartado y el total
   acumulado. **Nunca se descarta nada en silencio.** Riesgo conocido: puede desaparecer
@@ -138,6 +149,25 @@ Esto no elimina dos limitaciones que siguen igual:
 - No se envía `sampled_at`. Los eventos que salen de la cola después de un corte quedan
   sellados por el servidor con la hora de **recepción**, no con la de la detección, así
   que en el panel aparecerán agrupados en el momento de la reconexión.
+
+### Conexión HTTPS persistente (keep-alive)
+Antes cada mensaje abría una conexión TLS nueva, y el handshake (~1 s en el ESP32)
+dominaba el envío: medido con el tren en marcha, **~1,6 s por mensaje** (8 envíos por
+vuelta de ~13 s) frente a ~10 mensajes generados por vuelta. La cola crecía sin parar,
+la web iba hasta ~25 s por detrás de la LCD y al llenarse se descartaban eventos reales.
+
+Ahora `tlsCliente` y `httpCliente` son globales y la conexión se reutiliza: el handshake
+se paga una vez y cada mensaje cuesta solo la ida y vuelta de la petición. Detalles:
+- Los dos objetos viven fuera de la función de envío porque el destructor de
+  `HTTPClient` cierra el socket.
+- El certificado se sigue verificando en cada handshake (`setCACert`, nunca
+  `setInsecure()`).
+- Si la conexión reutilizada se había cerrado en reposo, el envío se reintenta **una**
+  vez con conexión nueva y lo avisa por Serial. Es seguro por el `sample_id`: si el
+  primer intento sí llegó, la API responde 200 (duplicada).
+- Ante cualquier error de red se cierra el socket, para empezar limpio.
+- **PENDIENTE DE MEDIR** con el tren en marcha: el tiempo real por mensaje con la
+  conexión reutilizada y cuánto tarda el servidor en cerrar una conexión en reposo.
 
 ### Potencia de transmisión WiFi reducida
 `WiFi.setTxPower(WIFI_POWER_15dBm)` baja la potencia desde el máximo de fábrica
