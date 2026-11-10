@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { telemetrySchema, newUserSchema } from '../lib/validation';
+import { telemetrySchema, trainSchema, healthSchema, updateStationSchema, newUserSchema } from '../lib/validation';
 import { fresh, toCsv, errorMessage } from '../lib/format';
 const sample_id = 'c0f1dd43-6db9-46fd-8b89-399a2ce4c480';
 // Datos exclusivamente de prueba: nunca se cargan en la aplicación ni en Supabase.
@@ -54,4 +54,29 @@ test('CSV escapa comillas, neutraliza fórmulas de texto y mantiene números', (
 test('un error sin mensaje nunca se muestra vacío', () => {
   for (const e of [{ message: '' }, { message: '   ' }, { message: null }, new Error(''), null, 'texto']) assert.ok(errorMessage(e).length > 0);
   assert.equal(errorMessage(new Error('fallo')), 'fallo');
+});
+
+test('intervalos del tren: solo en llegadas, en pareja y dentro del tope de 10 minutos', () => {
+  const ok = { station_number: 2, detected: true, prev_station_number: 1, ms_from_prev: 4800, lap_ms: 13200 };
+  assert.ok(trainSchema.safeParse(ok).success);
+  assert.ok(trainSchema.safeParse({ station_number: 2, detected: true }).success); // primera pasada: sin intervalos
+  assert.ok(!trainSchema.safeParse({ ...ok, detected: false }).success);           // la salida no lleva intervalos
+  assert.ok(!trainSchema.safeParse({ station_number: 2, detected: true, ms_from_prev: 4800 }).success); // sin pareja
+  assert.ok(!trainSchema.safeParse({ station_number: 2, detected: true, lap_ms: 700000 }).success);     // no es una vuelta
+});
+
+test('salud del dispositivo: bloque completo aceptado, y basta por sí solo como mensaje', () => {
+  const health = { reset_reason: 'brownout', uptime_s: 120, rssi_dbm: -44, free_heap_b: 137000, queue_dropped: 0 };
+  assert.ok(healthSchema.safeParse(health).success);
+  assert.ok(!healthSchema.safeParse({ ...health, rssi_dbm: 5 }).success);        // un RSSI positivo no existe
+  assert.ok(!healthSchema.safeParse({ ...health, reset_reason: '' }).success);
+  assert.ok(telemetrySchema.safeParse({ sample_id: '8c7c84ea-6cb5-4bb1-96e7-ef5a24beb4b9', device_health: health }).success);
+});
+
+test('estaciones: se puede cambiar solo la distancia, borrarla con null, y algo hay que cambiar', () => {
+  assert.ok(updateStationSchema.safeParse({ position: 1, gap_to_next_m: 2.35 }).success);
+  assert.ok(updateStationSchema.safeParse({ position: 1, gap_to_next_m: null }).success);
+  assert.ok(updateStationSchema.safeParse({ position: 1, name: 'Andén Norte' }).success);
+  assert.ok(!updateStationSchema.safeParse({ position: 1 }).success);
+  assert.ok(!updateStationSchema.safeParse({ position: 1, gap_to_next_m: -2 }).success);
 });

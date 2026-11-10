@@ -18,7 +18,8 @@ export async function POST(request: Request) {
     const payload = await readBody(request, telemetrySchema);
     const { data, error: ingestError } = await client.rpc('ingest_telemetry', {
       p_device_id: deviceId!, p_sample_id: payload.sample_id, p_sampled_at: payload.sampled_at ?? null,
-      p_measurements: payload.measurements ?? null, p_train: payload.train_status ?? null, p_solar: payload.solar_station ?? null
+      p_measurements: payload.measurements ?? null, p_train: payload.train_status ?? null, p_solar: payload.solar_station ?? null,
+      p_health: payload.device_health ?? null
     });
     if (ingestError) {
       if (ingestError.message.includes('device_disabled')) throw new HttpError(403, 'Dispositivo inactivo.');

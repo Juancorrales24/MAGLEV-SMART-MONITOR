@@ -1,16 +1,18 @@
 'use client';
 import { useMemo } from 'react';
 import { useTelemetry, useLiveState } from '@/hooks/use-telemetry';
-import { PageTitle, Panel, StatusPill, LoadingState } from '@/components/ui';
+import { PageTitle, Panel, StatusPill, LoadingState, EmptyState } from '@/components/ui';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { TelemetryChart } from '@/components/TelemetryChart';
 import { TrainEvents } from '@/components/TrainEvents';
 import { SolarTable } from '@/components/SolarTable';
 import { sensorEvents } from '@/lib/train-state';
-import { dateTime, relativeAge, STALE_SECONDS, NO_DATA } from '@/lib/format';
+import { latestHealth, restartsInWindow, resetReasonLabel, formatUptime } from '@/lib/device-health';
+import { dateTime, number, relativeAge, STALE_SECONDS, NO_DATA } from '@/lib/format';
 export default function Monitoring() {
   const f = useTelemetry(); const { device, link } = useLiveState();
   const events = useMemo(() => sensorEvents(f.train), [f.train]);
+  const health = latestHealth(f.health); const restarts = useMemo(() => restartsInWindow(f.health), [f.health]);
   return <>
     <PageTitle eyebrow="ADQUISICIÓN CONTINUA" title="Tiempo real" description="Los eventos y lecturas nuevos se incorporan automáticamente."
       actions={<StatusPill state={link.key} label={link.label}/>}/>
@@ -22,6 +24,18 @@ export default function Monitoring() {
       <div><span>Caducidad de la telemetría</span><strong>{STALE_SECONDS} s sin recepción</strong></div>
     </div>
     {f.loading ? <LoadingState/> : <>
+      <Panel title="Salud del dispositivo" subtitle="Autodiagnóstico que el propio ESP32 envía cada ~30 s: motivo del último arranque, tiempo encendido, señal WiFi, memoria libre y mensajes descartados por su cola.">
+        {!health ? <EmptyState compact title="Sin muestras de salud todavía" description="El firmware actualizado envía su primera muestra de salud a los pocos segundos de arrancar con WiFi. Si el ESP32 está encendido y esto sigue vacío, le falta la actualización."/> :
+        <dl className="settings-list">
+          <div><dt>Motivo del último arranque</dt><dd>{resetReasonLabel(health.reset_reason)}</dd></div>
+          <div><dt>Encendido desde hace</dt><dd>{formatUptime(health.uptime_s) ?? NO_DATA}</dd></div>
+          <div><dt>Señal WiFi (RSSI)</dt><dd>{health.rssi_dbm != null ? `${health.rssi_dbm} dBm` : NO_DATA}</dd></div>
+          <div><dt>Memoria libre</dt><dd>{health.free_heap_b != null ? `${number(health.free_heap_b / 1024, 0)} KiB` : NO_DATA}</dd></div>
+          <div><dt>Mensajes descartados por la cola desde el arranque</dt><dd>{health.queue_dropped ?? NO_DATA}</dd></div>
+          <div><dt>Reinicios visibles en la ventana cargada</dt><dd>{restarts}</dd></div>
+          <div><dt>Última muestra de salud</dt><dd>{dateTime(health.created_at)} · {relativeAge(health.created_at, f.now)}</dd></div>
+        </dl>}
+      </Panel>
       <div className="two-columns">
         <Panel title="Voltaje del panel" subtitle="Ventana de las últimas lecturas recibidas"><TelemetryChart data={f.solar} field="panel_voltage" label="Voltaje del panel" unit="V" color="#D72638"/></Panel>
         <Panel title="Voltaje de la batería" subtitle="Ventana de las últimas lecturas recibidas"><TelemetryChart data={f.solar} field="battery_voltage" label="Voltaje de la batería" unit="V" color="#5B8FD4"/></Panel>

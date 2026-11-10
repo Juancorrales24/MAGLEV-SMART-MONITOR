@@ -1,8 +1,11 @@
 -- Ejecutar después de policies.sql. Funciones invocables solo por el servidor.
 begin;
+-- La firma anterior (sin p_health) se elimina: dos funciones homónimas obligarían a
+-- PostgREST a desambiguar por argumentos en cada llamada.
+drop function if exists public.ingest_telemetry(uuid,uuid,timestamptz,jsonb,jsonb,jsonb);
 create or replace function public.ingest_telemetry(
  p_device_id uuid, p_sample_id uuid, p_sampled_at timestamptz,
- p_measurements jsonb, p_train jsonb, p_solar jsonb
+ p_measurements jsonb, p_train jsonb, p_solar jsonb, p_health jsonb
 ) returns boolean language plpgsql security definer set search_path='' as $$
 declare d public.devices; stamp timestamptz := clock_timestamp();
 begin
@@ -14,7 +17,7 @@ begin
  -- estación 2 + muestras solares) el ESP32 genera mensajes casi al mismo ritmo que el límite
  -- viejo permitía, y la cola se llenaba descartando eventos reales. 400 ms da margen real.
  if d.last_seen > stamp - interval '400 milliseconds' then raise exception 'rate_limit'; end if;
- if p_measurements is null and p_train is null and p_solar is null then raise exception 'empty_payload'; end if;
+ if p_measurements is null and p_train is null and p_solar is null and p_health is null then raise exception 'empty_payload'; end if;
  if p_sampled_at > stamp + interval '5 minutes' then raise exception 'future_timestamp'; end if;
  insert into public.ingest_receipts(device_id,sample_id,created_at) values(p_device_id,p_sample_id,stamp);
  if p_measurements is not null then
@@ -24,12 +27,22 @@ begin
  if p_train is not null then
   -- Evento de sensor infrarrojo: station_number es el número fijo del sensor por cableado (1-3) y
   -- detected distingue llegada (true) de salida (false). Las columnas de levitación quedan nulas.
-  insert into public.train_status(device_id,sample_id,sampled_at,station_number,detected,created_at)
-  values(p_device_id,p_sample_id,p_sampled_at,(p_train->>'station_number')::smallint,(p_train->>'detected')::boolean,stamp);
+  -- Los intervalos (lap_ms, ms_from_prev) los mide el ESP32 con su reloj monotónico y solo
+  -- acompañan llegadas; ausentes = primera pasada tras un arranque o intervalo fuera de rango.
+  insert into public.train_status(device_id,sample_id,sampled_at,station_number,detected,prev_station_number,ms_from_prev,lap_ms,created_at)
+  values(p_device_id,p_sample_id,p_sampled_at,(p_train->>'station_number')::smallint,(p_train->>'detected')::boolean,
+   (p_train->>'prev_station_number')::smallint,(p_train->>'ms_from_prev')::integer,(p_train->>'lap_ms')::integer,stamp);
  end if;
  if p_solar is not null then
   insert into public.solar_station(device_id,sample_id,sampled_at,panel_voltage,battery_voltage,battery_level,panel_current,power_output,created_at)
   values(p_device_id,p_sample_id,p_sampled_at,(p_solar->>'panel_voltage')::double precision,(p_solar->>'battery_voltage')::double precision,(p_solar->>'battery_level')::double precision,(p_solar->>'panel_current')::double precision,(p_solar->>'power_output')::double precision,stamp);
+ end if;
+ if p_health is not null then
+  -- Salud del dispositivo: autodiagnóstico medido por el propio ESP32 (motivo del último
+  -- arranque, tiempo encendido, señal WiFi, heap libre y mensajes descartados de su cola).
+  insert into public.device_health(device_id,sample_id,sampled_at,reset_reason,uptime_s,rssi_dbm,free_heap_b,queue_dropped,created_at)
+  values(p_device_id,p_sample_id,p_sampled_at,(p_health->>'reset_reason'),(p_health->>'uptime_s')::bigint,
+   (p_health->>'rssi_dbm')::smallint,(p_health->>'free_heap_b')::integer,(p_health->>'queue_dropped')::integer,stamp);
  end if;
  update public.devices set last_seen=stamp where id=p_device_id;
  return true;
@@ -48,8 +61,8 @@ begin
   (select count(*) from public.profiles where active and role='admin')<=1 then raise exception 'last_admin'; end if;
  update public.profiles set name=trim(p_name),role=p_role,active=p_active where id=p_id;
 end; $$;
-revoke all on function public.ingest_telemetry(uuid,uuid,timestamptz,jsonb,jsonb,jsonb) from public,anon,authenticated;
+revoke all on function public.ingest_telemetry(uuid,uuid,timestamptz,jsonb,jsonb,jsonb,jsonb) from public,anon,authenticated;
 revoke all on function public.admin_update_profile(uuid,uuid,text,text,boolean) from public,anon,authenticated;
-grant execute on function public.ingest_telemetry(uuid,uuid,timestamptz,jsonb,jsonb,jsonb) to service_role;
+grant execute on function public.ingest_telemetry(uuid,uuid,timestamptz,jsonb,jsonb,jsonb,jsonb) to service_role;
 grant execute on function public.admin_update_profile(uuid,uuid,text,text,boolean) to service_role;
 commit;
