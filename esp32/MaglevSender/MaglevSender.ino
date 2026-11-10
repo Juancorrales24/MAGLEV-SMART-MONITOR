@@ -57,7 +57,16 @@ int ultimoHttpCodigo = 0;
 unsigned long ultimoHttpCorrectoMs = 0;
 String inputLine;
 bool descartandoLinea = false;
-unsigned long ultimoEnvio = 0, ultimoWifi = 0, ultimaMuestraSolar = 0;
+unsigned long ultimoWifi = 0, ultimaMuestraSolar = 0;
+
+// El envio HTTPS corre en su propia tarea de FreeRTOS, en el nucleo 0, para que un
+// intento lento o fallido (hasta ~18 s entre handshake TLS y espera de respuesta)
+// nunca bloquee loop() (nucleo 1): sensores IR, LCD y web local siguen atendidos
+// en todo momento. colaMutex protege la cola, que ahora escriben AMBOS nucleos
+// (loop() al encolar, la tarea de red al desencolar).
+SemaphoreHandle_t colaMutex = nullptr;
+TaskHandle_t tareaRedHandle = nullptr;
+unsigned long ultimoEnvio = 0;
 unsigned long reintentoMs = INTERVALO_MIN_ENVIO_MS;
 
 // Ultimas lecturas solares, para la LCD. solarValido evita mostrar ceros inventados.
@@ -104,6 +113,8 @@ void aplicarBackoff() {
 
 // Encola una copia del JSON ya serializado. Devuelve false e informa SIEMPRE por
 // Serial cuando descarta algo: nunca se pierde un mensaje en silencio.
+// Se llama desde loop() (nucleo 1); toma colaMutex porque la tarea de red (nucleo 0)
+// lee y modifica la misma cola al desencolar.
 bool colaEmpujar(const char* json, uint8_t clase) {
   const size_t len = strlen(json);
   if (len + 1 > COLA_BYTES_POR_RANURA) {
@@ -111,6 +122,7 @@ bool colaEmpujar(const char* json, uint8_t clase) {
                   (unsigned)len, (unsigned)COLA_BYTES_POR_RANURA);
     return false;
   }
+  xSemaphoreTake(colaMutex, portMAX_DELAY);
   // Las muestras solares son periodicas y la siguiente sustituye a la anterior:
   // se limita su acumulacion para que un corte de red no llene la cola y deje
   // sin sitio a los eventos de tren, que son irrepetibles.
@@ -122,6 +134,7 @@ bool colaEmpujar(const char* json, uint8_t clase) {
                     "hasta vaciar (omitidas en total: %lu).\n",
                     (unsigned)COLA_MAX_SOLAR_EN_ESPERA, colaSolarOmitidas);
     }
+    xSemaphoreGive(colaMutex);
     return false;
   }
   if (colaUsadas >= COLA_RANURAS) {
@@ -140,6 +153,7 @@ bool colaEmpujar(const char* json, uint8_t clase) {
   cola[destino].clase = clase;
   colaUsadas++;
   if (clase == CLASE_SOLAR) avisoSolarEmitido = false;
+  xSemaphoreGive(colaMutex);
   return true;
 }
 
@@ -645,12 +659,20 @@ void leerSerial() {
 }
 
 // ---------------------------------------------------------------------------
-// Envio HTTPS del frente de la cola
+// Envio HTTPS del frente de la cola — corre en tareaRed (nucleo 0), nunca en loop().
 // ---------------------------------------------------------------------------
 void enviarFrenteDeCola() {
+  // Copiar el mensaje del frente bajo mutex: el handshake TLS y el POST en si (hasta
+  // ~18 s) no necesitan tener la cola bloqueada, y loop() sigue pudiendo encolar
+  // mientras tanto.
+  char mensaje[COLA_BYTES_POR_RANURA];
+  xSemaphoreTake(colaMutex, portMAX_DELAY);
+  snprintf(mensaje, sizeof(mensaje), "%s", cola[colaInicio].json);
+  xSemaphoreGive(colaMutex);
+
   WiFiClientSecure tls;
   tls.setCACert(ROOT_CA); // verificacion TLS real: nunca setInsecure()
-  tls.setHandshakeTimeout(TLS_HANDSHAKE_S); // segundos; el defecto (120 s) bloquea loop()
+  tls.setHandshakeTimeout(TLS_HANDSHAKE_S); // segundos
   HTTPClient http;
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
@@ -662,7 +684,7 @@ void enviarFrenteDeCola() {
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
   http.addHeader("X-Device-Id", DEVICE_ID);
-  const int code = http.POST(String(cola[colaInicio].json));
+  const int code = http.POST(String(mensaje));
   ultimoHttpCodigo = code;
   if (code == 200 || code == 201) ultimoHttpCorrectoMs = millis();
   http.end();
@@ -670,11 +692,14 @@ void enviarFrenteDeCola() {
   // la ventana del servidor, que la mide entre mensajes aceptados.
   ultimoEnvio = millis();
   if (code == 201 || code == 200) {
+    xSemaphoreTake(colaMutex, portMAX_DELAY);
+    colaQuitarFrente();
+    const unsigned enCola = colaUsadas;
+    xSemaphoreGive(colaMutex);
     Serial.printf("OK %d: %s (quedan %u en cola). Heap libre %u B, mayor bloque %u B.\n",
                   code, code == 200 ? "duplicada, ya estaba registrada" : "registrada",
-                  (unsigned)(colaUsadas - 1),
-                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
-    colaQuitarFrente(); reintentoMs = INTERVALO_MIN_ENVIO_MS;
+                  enCola, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    reintentoMs = INTERVALO_MIN_ENVIO_MS;
   } else if (code == 429) {
     // Limite de ritmo: el mensaje sigue siendo valido. Se conserva su sample_id y se
     // reintenta con una espera fija; no hace falta backoff exponencial.
@@ -683,9 +708,11 @@ void enviarFrenteDeCola() {
   } else if (code >= 400 && code < 500) {
     // 400 formato/rango, 401 credenciales, 403 dispositivo inactivo, 413 tamano,
     // 415 content-type: rechazos definitivos, reintentar no cambiaria el resultado.
-    Serial.printf("ERROR HTTP %d: rechazo definitivo, mensaje descartado -> %s\n",
-                  code, cola[colaInicio].json);
-    colaQuitarFrente(); reintentoMs = INTERVALO_MIN_ENVIO_MS;
+    Serial.printf("ERROR HTTP %d: rechazo definitivo, mensaje descartado -> %s\n", code, mensaje);
+    xSemaphoreTake(colaMutex, portMAX_DELAY);
+    colaQuitarFrente();
+    xSemaphoreGive(colaMutex);
+    reintentoMs = INTERVALO_MIN_ENVIO_MS;
   } else {
     // 5xx o error de red (codigo negativo de HTTPClient): se conserva el sample_id,
     // asi que un reintento tras una respuesta perdida da 200 y no duplica el registro.
@@ -704,15 +731,33 @@ void enviarFrenteDeCola() {
                   (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     aplicarBackoff();
   }
-  // Durante el POST loop() estuvo bloqueado. La ISR guardo el instante de los
-  // flancos, asi que se atiende lo ocurrido en ese hueco en cuanto se vuelve.
-  revisarSensoresIR(millis());
+}
+
+// ---------------------------------------------------------------------------
+// Tarea de red (nucleo 0): revisa la cola y envia sin bloquear loop() (nucleo 1).
+// ---------------------------------------------------------------------------
+void tareaRed(void* parametro) {
+  (void)parametro;
+  for (;;) {
+    const unsigned long ahora = millis();
+    bool debeEnviar = false;
+    if (cloudConfigurada && WiFi.status() == WL_CONNECTED &&
+        (unsigned long)(ahora - ultimoEnvio) >= reintentoMs &&
+        time(nullptr) >= HORA_MINIMA_VALIDA) {
+      xSemaphoreTake(colaMutex, portMAX_DELAY);
+      debeEnviar = colaUsadas > 0;
+      xSemaphoreGive(colaMutex);
+    }
+    if (debeEnviar) enviarFrenteDeCola();
+    else vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 // ---------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   inputLine.reserve(SERIAL_MAX_LINEA + 1);
+  colaMutex = xSemaphoreCreateMutex();
 
   // Se permite el modo local sin credenciales de Internet.
   cloudConfigurada = strlen(WIFI_SSID) > 0 && strlen(DEVICE_ID) > 0 &&
@@ -728,6 +773,12 @@ void setup() {
   // Se mantienen dos interfaces: AP local y STA para conectar al router.
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
+  // Baja la potencia de transmision (maximo de fabrica ~19,5 dBm) para reducir el
+  // pico de corriente en cada transmision, que puede hundir el voltaje y reiniciar
+  // el ESP32 (POWERON_RESET) con una fuente USB justa. 15 dBm deja margen de sobra
+  // con la señal medida en pruebas (RSSI -44 a -48 dBm); si el ESP32 queda mas lejos
+  // del router o pierde conexion, subir este valor.
+  WiFi.setTxPower(WIFI_POWER_15dBm);
   if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
     Serial.printf("RED MAGLEV LOCAL: %s | IP: %s\n",
                   AP_SSID, WiFi.softAPIP().toString().c_str());
@@ -751,13 +802,18 @@ void setup() {
   revisarSensoresIR(ahora);
   actualizarEstacionVisible(ahora);
   atenderLcd(ahora);
+  // Nucleo 0: solo el envio HTTPS. Nucleo 1 (loop(), por defecto en el core Arduino
+  // de ESP32) sigue libre para sensores, LCD y servidor local sin que un envio
+  // lento lo bloquee. Pila generosa: ahi vive el handshake TLS, no en loop().
+  xTaskCreatePinnedToCore(tareaRed, "tareaRed", 12288, nullptr, 1, &tareaRedHandle, 0);
   Serial.printf("ESP32 listo. Sensores GPIO 25/26/27, pantalla retenida %lu ms, cola de %u.\n",
                 RETENCION_ESTACION_MS, (unsigned)COLA_RANURAS);
 }
 
 void loop() {
   unsigned long ahora = millis();
-  // Priorizar los sensores incluso cuando no hay WiFi.
+  // Priorizar los sensores incluso cuando no hay WiFi. El envio HTTPS vive en
+  // tareaRed (nucleo 0): loop() nunca espera por la red.
   revisarSensoresIR(ahora);
   actualizarEstacionVisible(ahora);
   atenderLcd(ahora);
@@ -778,11 +834,5 @@ void loop() {
     actualizarEstacionVisible(ahora);
     atenderLcd(ahora);
   }
-  // El modo local funciona aun cuando no esta configurada la API.
-  if (!cloudConfigurada || colaUsadas == 0 || WiFi.status() != WL_CONNECTED) {
-    delay(1); return;
-  }
-  if ((unsigned long)(ahora - ultimoEnvio) < reintentoMs) { delay(1); return; }
-  if (time(nullptr) < HORA_MINIMA_VALIDA) { delay(1); return; }
-  enviarFrenteDeCola();
+  delay(1);
 }

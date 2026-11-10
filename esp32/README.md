@@ -108,26 +108,40 @@ detecta con tres sensores infrarrojos, uno por estación.
   acumulado. **Nunca se descarta nada en silencio.** Riesgo conocido: puede desaparecer
   una llegada y sobrevivir su salida.
 
-### El POST sí bloquea: lo que se hace y lo que no
-`HTTPClient` es bloqueante, así que durante un envío (hasta ~10 s de handshake + 8 s de
-respuesta en el peor caso) `loop()` **no corre**. Esto no se puede eliminar sin mover el
-envío a otra tarea de FreeRTOS. Lo que sí se hace:
+### El POST ya no bloquea: envío en su propia tarea de FreeRTOS
+`HTTPClient` es bloqueante (hasta ~10 s de handshake TLS + 8 s de respuesta en el peor
+caso), pero ya no corre dentro de `loop()`. El ESP32 tiene 2 núcleos y el core Arduino
+los reparte así:
 
-- Una **interrupción por flanco** (`CHANGE`) en cada pin IR guarda nivel, instante
-  (`millis()`) y número de flancos. Al volver del POST, el firmware usa el **instante
-  real del flanco** en lugar del momento en que pudo mirar, así que una llegada ocurrida
-  durante el bloqueo se registra con su hora correcta y no se pierde.
-- Se acotan los tiempos (`TLS_HANDSHAKE_S`, `HTTP_TIMEOUT_MS`), no se intenta enviar sin
-  WiFi ni sin hora válida, se lee Serial con un presupuesto de bytes por vuelta, y se
-  revisan los sensores justo al volver del POST y justo después del muestreo ADC.
-- **Limitación que queda:** la interrupción guarda solo el último flanco. Si el tren
-  llega **y** sale completamente dentro del bloqueo, ese paso no se puede reconstruir;
+- **Núcleo 1**: `loop()` — sensores IR, LCD, servidor web local y lectura de Serial.
+  Corre sin interrupciones, le toque o no esperar a la red.
+- **Núcleo 0**: `tareaRed`, una tarea de FreeRTOS dedicada solo a `enviarFrenteDeCola()`.
+  Revisa la cola y envía cuando toca; si un intento tarda o falla, solo bloquea esa
+  tarea, nunca la lectura de sensores.
+
+La cola (`cola[]`, `colaInicio`, `colaUsadas`) la tocan los dos núcleos — `loop()` al
+encolar, `tareaRed` al desencolar — así que está protegida con un mutex (`colaMutex`,
+`xSemaphoreTake`/`xSemaphoreGive`) en cada acceso. `enviarFrenteDeCola()` copia el
+mensaje del frente bajo el mutex y lo suelta antes del handshake TLS: la cola nunca
+queda bloqueada durante el envío en sí.
+
+Esto no elimina dos limitaciones que siguen igual:
+- La interrupción por flanco (`CHANGE`) en cada pin IR solo guarda el último flanco; si
+  el tren llega **y** sale completamente entre dos vueltas de `revisarSensoresIR()` (algo
+  ahora mucho más raro, al no haber bloqueo de red), ese paso no se puede reconstruir —
   el firmware lo detecta (dos o más flancos sin cambio neto de estado) y lo avisa por
   Serial en vez de callarlo.
-- **Limitación que queda:** no se envía `sampled_at`. Los eventos que salen de la cola
-  después de un corte quedan sellados por el servidor con la hora de **recepción**, no
-  con la de la detección, así que en el panel aparecerán agrupados en el momento de la
-  reconexión.
+- No se envía `sampled_at`. Los eventos que salen de la cola después de un corte quedan
+  sellados por el servidor con la hora de **recepción**, no con la de la detección, así
+  que en el panel aparecerán agrupados en el momento de la reconexión.
+
+### Potencia de transmisión WiFi reducida
+`WiFi.setTxPower(WIFI_POWER_15dBm)` baja la potencia desde el máximo de fábrica
+(~19,5 dBm) para reducir el pico de corriente de cada transmisión — con una fuente USB
+justa, ese pico puede hundir el voltaje lo suficiente para reiniciar el ESP32
+(`rst:0x1 (POWERON_RESET)`, confirmado en pruebas de campo). 15 dBm deja margen de sobra
+con el RSSI medido (-44 a -48 dBm); si el ESP32 queda más lejos del router o pierde
+conexión, hay que subir este valor en `MaglevSender.ino`.
 
 ### LCD
 - Dirección I2C, pines SDA/SCL y tiempos son configurables. Lo habitual es **0x27 o
