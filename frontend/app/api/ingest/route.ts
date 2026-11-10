@@ -22,7 +22,7 @@ export async function POST(request: Request) {
     });
     if (ingestError) {
       if (ingestError.message.includes('device_disabled')) throw new HttpError(403, 'Dispositivo inactivo.');
-      if (ingestError.message.includes('rate_limit')) throw new HttpError(429, 'Espera al menos un segundo entre mensajes.');
+      if (ingestError.message.includes('rate_limit')) throw new HttpError(429, 'Espera al menos 400 ms entre mensajes.');
       // Rechazos definitivos del contenido: 4xx para que el emisor no reintente indefinidamente.
       if (ingestError.message.includes('future_timestamp')) throw new HttpError(400, 'La fecha de muestreo no puede estar más de cinco minutos en el futuro.');
       if (ingestError.message.includes('empty_payload')) throw new HttpError(400, 'Incluye un bloque con mediciones.');

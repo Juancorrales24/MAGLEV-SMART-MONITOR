@@ -23,14 +23,17 @@ const char* ROOT_CA = R"PEM(
 #define HTTP_TIMEOUT_MS     8000     // tope de conexión y de respuesta del POST
 
 // === Ritmo de envío y cola de mensajes ======================================
-// La API acepta como máximo 1 mensaje NUEVO por segundo y por dispositivo (429 si
-// no). Se deja margen porque el reloj del ESP32 y el del servidor no coinciden.
-#define INTERVALO_MIN_ENVIO_MS 1200UL
-#define INTERVALO_429_MS       1500UL  // espera fija tras un 429 (el mensaje sigue siendo válido)
+// La API acepta como máximo 1 mensaje NUEVO cada 400 ms por dispositivo (429 si no,
+// ver supabase/functions.sql). Se deja margen porque el reloj del ESP32 y el del
+// servidor no coinciden. Con el tren dando vueltas de forma continua (3 estaciones +
+// ocasional doble disparo en una de ellas + muestras solares) el ritmo de 1 msg/s
+// anterior no daba abasto y la cola se llenaba descartando eventos reales.
+#define INTERVALO_MIN_ENVIO_MS 500UL
+#define INTERVALO_429_MS       600UL   // espera fija tras un 429 (el mensaje sigue siendo válido)
 #define REINTENTO_MAX_MS       60000UL // tope del backoff exponencial ante 5xx o error de red
 
 // Cola FIFO en RAM estática: COLA_RANURAS x COLA_BYTES_POR_RANURA ≈ 6,2 KiB con los
-// valores por defecto (16 x 384 B). A 1 mensaje/s cubre ~16 s de atasco de red.
+// valores por defecto (16 x 384 B). A 1 mensaje/400 ms cubre ~6,4 s de atasco de red.
 // Un mensaje de evento ocupa ~100 B y uno solar ~150 B, así que 384 B sobran.
 // Si se sube COLA_RANURAS, comprobar el heap libre: WiFi + handshake TLS ya gastan
 // bastante y quedarse sin memoria impide enviar nada.

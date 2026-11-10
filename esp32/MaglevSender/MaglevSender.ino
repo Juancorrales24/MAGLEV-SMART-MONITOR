@@ -9,7 +9,7 @@
  *   - acepta ademas lineas JSON por Serial para bloques que no mide el ESP32
  *     (p. ej. measurements), con el formato de documentation/Integracion_ESP32.md;
  *   - encola los mensajes en RAM (FIFO acotada) y los entrega por HTTPS a
- *     POST /api/ingest respetando el limite de 1 mensaje nuevo por segundo;
+ *     POST /api/ingest respetando el limite de mensajes nuevos de la API (INTERVALO_MIN_ENVIO_MS);
  *   - muestra cada deteccion en una LCD 1602 I2C, funcione o no la red.
  *
  * No simula mediciones: solo reporta lo que lee de sus pines o recibe por Serial.
@@ -82,7 +82,7 @@ bool solarValido = false;
 // estatica (sin malloc, para no fragmentar el heap que necesita el handshake TLS).
 // Dimensionado: COLA_RANURAS=16 x COLA_BYTES_POR_RANURA=384 B ~= 6,2 KiB estaticos.
 // Un ESP32 tiene 320 KiB de DRAM y deja ~150-200 KiB de heap libre con WiFi+TLS
-// activos, asi que 6 KiB es despreciable; a 1 mensaje/s la cola cubre ~16 s de
+// activos, asi que 6 KiB es despreciable; a 1 mensaje/400 ms la cola cubre ~6,4 s de
 // atasco de red, suficiente para una reconexion WiFi tipica. Subirla cuesta RAM
 // lineal: comprobar con ESP.getFreeHeap() antes de pasar de ~64 ranuras.
 enum ClaseMensaje : uint8_t { CLASE_TREN = 0, CLASE_SOLAR = 1, CLASE_SERIAL = 2 };
@@ -691,7 +691,7 @@ void enviarFrenteDeCola() {
   ultimoHttpCodigo = code;
   if (code == 200 || code == 201) ultimoHttpCorrectoMs = millis();
   http.end();
-  // El limite de 1 mensaje/s se mide desde que TERMINA el POST: mas conservador que
+  // El limite de INTERVALO_MIN_ENVIO_MS se mide desde que TERMINA el POST: mas conservador que
   // la ventana del servidor, que la mide entre mensajes aceptados.
   ultimoEnvio = millis();
   if (code == 201 || code == 200) {

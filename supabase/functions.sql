@@ -10,7 +10,10 @@ begin
  select * into d from public.devices where id=p_device_id for update;
  if not found or not d.enabled then raise exception 'device_disabled'; end if;
  if exists(select 1 from public.ingest_receipts where device_id=p_device_id and sample_id=p_sample_id) then return false; end if;
- if d.last_seen > stamp - interval '1 second' then raise exception 'rate_limit'; end if;
+ -- Antes 1 s: con el tren en marcha continua (3 estaciones + ocasional doble disparo en la
+ -- estación 2 + muestras solares) el ESP32 genera mensajes casi al mismo ritmo que el límite
+ -- viejo permitía, y la cola se llenaba descartando eventos reales. 400 ms da margen real.
+ if d.last_seen > stamp - interval '400 milliseconds' then raise exception 'rate_limit'; end if;
  if p_measurements is null and p_train is null and p_solar is null then raise exception 'empty_payload'; end if;
  if p_sampled_at > stamp + interval '5 minutes' then raise exception 'future_timestamp'; end if;
  insert into public.ingest_receipts(device_id,sample_id,created_at) values(p_device_id,p_sample_id,stamp);

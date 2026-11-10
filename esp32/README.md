@@ -91,13 +91,17 @@ detecta con tres sensores infrarrojos, uno por estación.
 - FIFO de `COLA_RANURAS` (16) ranuras de `COLA_BYTES_POR_RANURA` (384 B) en RAM
   **estática**, sin `malloc`, para no fragmentar el heap que necesita el handshake TLS.
   Son unos **6,2 KiB**: el ESP32 tiene 320 KiB de DRAM y deja ~150-200 KiB de heap con
-  WiFi y TLS activos. A 1 mensaje/s cubre ~16 s de atasco de red.
+  WiFi y TLS activos. A 1 mensaje/400 ms cubre ~6,4 s de atasco de red.
 - El `sample_id` se fija al encolar y viaja dentro de la ranura, así que **todos los
   reintentos reenvían el mismo**: si la respuesta se pierde pero el servidor ya la
   guardó, el reintento recibe un 200 (duplicada) y no se duplica el registro.
-- Respeta el **límite de 1 mensaje nuevo por segundo** de la API: `INTERVALO_MIN_ENVIO_MS`
-  (1200 ms) contados **desde que termina** el POST, que es más conservador que la
-  ventana del servidor. Un 429 se reintenta con espera fija; un 5xx o un error de red,
+- Respeta el **límite de mensajes nuevos** de la API (`supabase/functions.sql`, 400 ms
+  por dispositivo): `INTERVALO_MIN_ENVIO_MS` (500 ms) contados **desde que termina** el
+  POST, que es más conservador que la ventana del servidor. Antes el límite era de 1 s,
+  pero con el tren dando vueltas sin parar (3 estaciones + ocasional doble disparo en
+  una de ellas + muestras solares) no daba abasto y la cola se llenaba descartando
+  eventos reales — se subió el ritmo en el servidor y en el firmware a la vez.
+  Un 429 se reintenta con espera fija; un 5xx o un error de red,
   con backoff exponencial hasta 60 s; un 4xx definitivo (400, 401, 403, 413, 415)
   descarta el mensaje **informándolo por Serial**.
 - Las muestras solares se limitan a `COLA_MAX_SOLAR_EN_ESPERA` (3) en espera: son
@@ -181,7 +185,7 @@ esto.** Nada de lo siguiente está comprobado sobre el prototipo:
   12 KiB (`SET_LOOP_TASK_STACK_SIZE`) porque mbedTLS gasta varios KiB; si aun así
   aparecen reinicios por desbordamiento de pila, subir ese valor.
 - **Comportamiento real ante reconexión WiFi, reinicio y corte de alimentación**, y el
-  ritmo efectivo frente al límite de 1 mensaje/s de la API.
+  ritmo efectivo frente al límite de 400 ms/mensaje de la API.
 
 ### Qué sí se verificó (sin hardware)
 
