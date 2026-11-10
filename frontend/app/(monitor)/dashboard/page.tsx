@@ -31,7 +31,7 @@ export default function Dashboard() {
         <MetricCard label="Voltaje de la batería" value={s?.battery_voltage} unit="V" icon={BatteryCharging} accent="navy"
           detail={s?.battery_voltage == null ? `${NO_DATA}: sin lectura de la batería.` : `Medido ${dateTime(s.created_at)}`}/>
       </div>
-      <div className="metrics-grid three top-gap">
+      <div className="metrics-grid three">
         <MetricCard label="Carga estimada de la batería" value={s?.battery_level} unit="%" icon={Gauge} accent="navy" digits={0}
           detail="Estimación a partir del voltaje, no una medición directa de carga."/>
         <StatCard label="Última comunicación del ESP32" icon={Antenna} accent="navy"
@@ -40,7 +40,7 @@ export default function Dashboard() {
         <StatCard label="Estado de comunicación" icon={Activity} accent="navy" tone={link.ok ? 'on' : 'off'}
           value={<StatusPill state={link.key} label={link.label}/>} detail={link.detail}/>
       </div>
-      <div className="two-columns top-gap">
+      <div className="two-columns">
         <Panel title="Últimas detecciones" subtitle="Llegadas y salidas registradas por los sensores" action={<MiniLink href="/train">Ver vía y estaciones</MiniLink>}>
           <TrainEvents rows={events.slice(0, 6)} stations={f.stations} devices={f.devices} showReceipt={false}/>
         </Panel>
