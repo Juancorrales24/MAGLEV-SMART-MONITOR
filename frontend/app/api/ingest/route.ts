@@ -29,6 +29,12 @@ export async function POST(request: Request) {
       if (ingestError.code === '23514') throw new HttpError(400, 'Una lectura está fuera del rango permitido.');
       throw ingestError;
     }
-    return reply({ ok: true, duplicate: !data }, data ? 201 : 200);
+    // Nombres de las estaciones en cada respuesta aceptada: es el único canal de vuelta
+    // hacia el ESP32 (el dispositivo solo hace POST), y le permite mostrar en su LCD el
+    // nombre puesto en Configuración. Como la muestra solar envía cada pocos segundos,
+    // un renombrado llega al dispositivo casi de inmediato. Si esta consulta fallara,
+    // la telemetría ya está guardada: se responde sin nombres antes que con un 500.
+    const { data: stations } = await client.from('stations').select('position,name').order('position');
+    return reply({ ok: true, duplicate: !data, stations: stations ?? [] }, data ? 201 : 200);
   } catch (error) { return failure(error); }
 }

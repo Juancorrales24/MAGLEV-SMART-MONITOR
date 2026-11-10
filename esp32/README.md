@@ -178,6 +178,15 @@ con el RSSI medido (-44 a -48 dBm); si el ESP32 queda más lejos del router o pi
 conexión, hay que subir este valor en `MaglevSender.ino`.
 
 ### LCD
+- **Muestra el nombre de cada estación puesto en la web** (Configuración → Estaciones de
+  la vía). Los nombres viajan en la respuesta de cada envío aceptado (campo `stations`
+  de `POST /api/ingest`), así que un renombrado en la página llega al ESP32 en el
+  siguiente mensaje — con la muestra solar cada 5 s, unos segundos como mucho — y la
+  LCD se actualiza sola, incluso a mitad de la retención de 5 s. Límites del
+  controlador HD44780: 16 caracteres por línea (se trunca) y solo ASCII, así que las
+  tildes y la ñ se pierden («Andén» → «Anden»). Un nombre sin ningún carácter
+  representable, y el arranque antes del primer envío aceptado, usan «ESTACION N».
+  Los nombres no se guardan en flash: se recuperan con el primer envío tras reiniciar.
 - Dirección I2C, pines SDA/SCL y tiempos son configurables. Lo habitual es **0x27 o
   0x3F**, pero **no se puede afirmar cuál sin probar el módulo**: si nadie responde en
   la dirección configurada, el firmware escanea el bus y lista por Serial las
