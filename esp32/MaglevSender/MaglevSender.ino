@@ -683,8 +683,18 @@ void enviarFrenteDeCola() {
   } else {
     // 5xx o error de red (codigo negativo de HTTPClient): se conserva el sample_id,
     // asi que un reintento tras una respuesta perdida da 200 y no duplica el registro.
-    Serial.printf("REINTENTO HTTP %d: se conserva el sample_id (%u en cola).\n",
-                  code, (unsigned)colaUsadas);
+    // Diagnostico: un codigo negativo no dice POR QUE fallo (DNS, TLS, red); se
+    // imprime el texto de HTTPClient y, si hubo intento de TLS, el ultimo error de
+    // mbedTLS para distinguir "no hay ruta a Internet" de "certificado rechazado".
+    char tlsErr[128] = "";
+    tls.lastError(tlsErr, sizeof(tlsErr));
+    Serial.printf("REINTENTO HTTP %d (%s)%s%s: se conserva el sample_id (%u en cola). "
+                  "IP local %s, gateway %s, DNS %s, RSSI %d dBm.\n",
+                  code, http.errorToString(code).c_str(),
+                  tlsErr[0] ? " | TLS: " : "", tlsErr,
+                  (unsigned)colaUsadas,
+                  WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
+                  WiFi.dnsIP(0).toString().c_str(), (int)WiFi.RSSI());
     aplicarBackoff();
   }
   // Durante el POST loop() estuvo bloqueado. La ISR guardo el instante de los
