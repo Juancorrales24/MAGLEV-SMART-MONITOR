@@ -267,6 +267,9 @@ void iniciarLcd() {
   lcd.init(); lcd.backlight(); lcd.clear();
   lcdLineas[0][0] = '\0'; lcdLineas[1][0] = '\0'; // la pantalla esta en blanco: invalidar cache
   lcdEscribir("MAGLEV MONITOR", "Iniciando...");
+  // Sin esta pausa el resto de setup() (sensores, WiFi, servidor local) termina en
+  // milisegundos y sobreescribe el mensaje casi de inmediato: no da tiempo a leerlo.
+  delay(1500);
   Serial.printf("LCD 1602 I2C inicializada en 0x%02X.\n", (unsigned)LCD_DIRECCION_I2C);
 #endif
 }
