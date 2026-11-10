@@ -46,13 +46,14 @@ const char* ROOT_CA = R"PEM(
 #define SERIAL_BYTES_POR_VUELTA 256  // bytes leídos como máximo en cada vuelta de loop()
 
 // === Sensores infrarrojos (uno por estación) ================================
-// PENDIENTE DE CONFIRMAR CON EL CIRCUITO FÍSICO: el cableado definitivo todavía no
-// está decidido. El índice del array es la estación: pin 1 -> station_number 1, etc.
+// Cableado confirmado con el prototipo físico: estación 1 en GPIO 26, estación 2
+// en GPIO 25 (orden heredado del sketch original del técnico, donde "Sensor 1"
+// era GPIO 26 y "Sensor 2" era GPIO 25). Estación 3 sin cambios, GPIO 27.
 // Evitar GPIO 6-11 (flash SPI), GPIO 0/2/12/15 (strapping de arranque) y
 // GPIO 34-39 (solo entrada, sin pull-up interno). GPIO 34 y 35 ya los usa el ADC
 // solar, y GPIO 21/22 los usa la LCD por I2C.
-#define IR_PIN_ESTACION_1 25
-#define IR_PIN_ESTACION_2 26
+#define IR_PIN_ESTACION_1 26
+#define IR_PIN_ESTACION_2 25
 #define IR_PIN_ESTACION_3 27
 
 // Se preserva INPUT_PULLUP como en el sketch original del usuario.
