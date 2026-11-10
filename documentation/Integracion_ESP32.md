@@ -1,3 +1,5 @@
+> **VERSIÓN ACTUAL:** Este documento conserva detalles técnicos de la integración original. Para cargar el firmware actualizado con red WiFi propia, LCD de 5 segundos y enlazarlo a la web de GitHub, utiliza [GUIA_PASO_A_PASO_ESP32_MAGLEV.md](GUIA_PASO_A_PASO_ESP32_MAGLEV.md). Algunos apartados históricos pueden describir el firmware anterior.
+
 # Integración del ESP32: registro, configuración y carga del firmware
 
 Guía para seguir **con el ESP32 en las manos**. Antes de llegar aquí conviene haber

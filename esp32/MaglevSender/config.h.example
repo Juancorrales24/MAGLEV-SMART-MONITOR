@@ -1,6 +1,12 @@
 #pragma once
 // Copiar este archivo como config.h y completar localmente. No compartir config.h.
+// El monitor local funciona con los valores predeterminados; la nube es opcional hasta configurarla.
 // Aqui no van claves de Supabase: el ESP32 solo conoce su DEVICE_ID y su DEVICE_TOKEN.
+
+// === Red local ESP32 (funciona sin Internet) ================================
+// Contraseña de 8 caracteres minimo. Cambiarla antes de la presentacion.
+const char* AP_SSID = "MAGLEV-MONITOR";
+const char* AP_PASSWORD = "Maglev2026";
 
 // === Red y API ==============================================================
 const char* WIFI_SSID = "";
@@ -17,43 +23,43 @@ const char* ROOT_CA = R"PEM(
 #define HTTP_TIMEOUT_MS     8000     // tope de conexión y de respuesta del POST
 
 // === Ritmo de envío y cola de mensajes ======================================
-// La API acepta como máximo 1 mensaje NUEVO por segundo y por dispositivo (429 si
-// no). Se deja margen porque el reloj del ESP32 y el del servidor no coinciden.
-#define INTERVALO_MIN_ENVIO_MS 1200UL
-#define INTERVALO_429_MS       1500UL  // espera fija tras un 429 (el mensaje sigue siendo válido)
+// La API acepta como máximo 1 mensaje NUEVO cada 400 ms por dispositivo (429 si no,
+// ver supabase/functions.sql). Se deja margen porque el reloj del ESP32 y el del
+// servidor no coinciden. Con el tren dando vueltas de forma continua (3 estaciones +
+// ocasional doble disparo en una de ellas + muestras solares) el ritmo de 1 msg/s
+// anterior no daba abasto y la cola se llenaba descartando eventos reales.
+#define INTERVALO_MIN_ENVIO_MS 500UL
+#define INTERVALO_429_MS       600UL   // espera fija tras un 429 (el mensaje sigue siendo válido)
 #define REINTENTO_MAX_MS       60000UL // tope del backoff exponencial ante 5xx o error de red
 
 // Cola FIFO en RAM estática: COLA_RANURAS x COLA_BYTES_POR_RANURA ≈ 6,2 KiB con los
-// valores por defecto (16 x 384 B). A 1 mensaje/s cubre ~16 s de atasco de red.
+// valores por defecto (16 x 384 B). A 1 mensaje/400 ms cubre ~6,4 s de atasco de red.
 // Un mensaje de evento ocupa ~100 B y uno solar ~150 B, así que 384 B sobran.
 // Si se sube COLA_RANURAS, comprobar el heap libre: WiFi + handshake TLS ya gastan
 // bastante y quedarse sin memoria impide enviar nada.
 #define COLA_RANURAS            16
 #define COLA_BYTES_POR_RANURA   384
-// Las muestras solares son periódicas (la siguiente sustituye a la anterior), así
-// que no deben llenar la cola durante un corte de red y dejar sin sitio a los
-// eventos de tren, que son irrepetibles.
-#define COLA_MAX_SOLAR_EN_ESPERA 3
+// Las muestras solares no ocupan la cola cuando hay mensajes esperando: la última
+// viaja dentro del siguiente evento de tren (ver esp32/README.md).
 
 // Entrada JSON por Serial (bloques que no mide el ESP32, p. ej. measurements).
 #define SERIAL_MAX_LINEA        288  // debe dejar hueco para el sample_id (~51 B) en la ranura
 #define SERIAL_BYTES_POR_VUELTA 256  // bytes leídos como máximo en cada vuelta de loop()
 
 // === Sensores infrarrojos (uno por estación) ================================
-// PENDIENTE DE CONFIRMAR CON EL CIRCUITO FÍSICO: el cableado definitivo todavía no
-// está decidido. El índice del array es la estación: pin 1 -> station_number 1, etc.
+// Cableado confirmado con el prototipo físico: estación 1 en GPIO 26. Estaciones
+// 2 y 3 ajustadas a pedido del usuario (GPIO 27 = estación 2, GPIO 25 = estación 3).
 // Evitar GPIO 6-11 (flash SPI), GPIO 0/2/12/15 (strapping de arranque) y
 // GPIO 34-39 (solo entrada, sin pull-up interno). GPIO 34 y 35 ya los usa el ADC
 // solar, y GPIO 21/22 los usa la LCD por I2C.
-#define IR_PIN_ESTACION_1 25
-#define IR_PIN_ESTACION_2 26
-#define IR_PIN_ESTACION_3 27
+#define IR_PIN_ESTACION_1 26
+#define IR_PIN_ESTACION_2 27
+#define IR_PIN_ESTACION_3 25
 
-// Modo de la entrada. INPUT sirve para los módulos IR con salida digital tipo
-// comparador (FC-51, TCRT5000 con placa), que empujan el nivel activamente.
-// Usar INPUT_PULLUP si la salida es de colector abierto o es un fototransistor
-// desnudo. PENDIENTE DE CONFIRMAR con el módulo real.
-#define IR_MODO_ENTRADA INPUT
+// Se preserva INPUT_PULLUP como en el sketch original del usuario.
+// Comprobar que la salida digital de cada módulo no supere los 3.3 V.
+// La logica LOW/activo tambien queda intacta.
+#define IR_MODO_ENTRADA INPUT_PULLUP
 
 // Nivel activo de cada sensor: muchos módulos IR entregan LOW al detectar, pero no
 // todos. Se configura por estación para admitir módulos distintos en el mismo tren.
@@ -67,6 +73,12 @@ const bool IR_ACTIVO_EN_BAJO[3] = { true, true, true };
 // sensor. Subirlo si aparecen detecciones falsas; bajarlo si el tren pasa tan
 // rápido que se pierden eventos. PENDIENTE DE AJUSTAR CON EL TREN EN MARCHA.
 #define IR_ANTIRREBOTE_MS 20UL
+
+// La SALIDA solo se da por buena tras este tiempo sin presencia. Evita que un mismo
+// paso del tren se registre como dos (medido en la estación 2: dos pulsos separados
+// por ~80 ms en cada vuelta). Contrapartida: la salida se notifica este tiempo más
+// tarde y dos pasos separados por menos se verían como uno.
+#define IR_SALIDA_ESTABLE_MS 250UL
 
 // === Estación solar: panel y batería por ADC ================================
 // Divisor resistivo en cada entrada; ambos pines son solo-entrada del ADC1, que es
@@ -103,6 +115,4 @@ const bool IR_ACTIVO_EN_BAJO[3] = { true, true, true };
 #define LCD_PIN_SCL 22
 
 // Tiempos de la pantalla, para que se pueda leer y no parpadee.
-#define LCD_MS_MINIMO_EVENTO    1200UL // un evento nuevo espera a que el anterior se haya leído
-#define LCD_MS_RETENER_EVENTO   2500UL // cuánto se mantiene el evento antes de volver al estado
-#define LCD_MS_REFRESCO_ESTADO  2000UL // ritmo máximo de refresco de la pantalla de estado
+

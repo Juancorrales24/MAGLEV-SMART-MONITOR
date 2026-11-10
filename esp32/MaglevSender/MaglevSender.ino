@@ -9,7 +9,7 @@
  *   - acepta ademas lineas JSON por Serial para bloques que no mide el ESP32
  *     (p. ej. measurements), con el formato de documentation/Integracion_ESP32.md;
  *   - encola los mensajes en RAM (FIFO acotada) y los entrega por HTTPS a
- *     POST /api/ingest respetando el limite de 1 mensaje nuevo por segundo;
+ *     POST /api/ingest respetando el limite de mensajes nuevos de la API (INTERVALO_MIN_ENVIO_MS);
  *   - muestra cada deteccion en una LCD 1602 I2C, funcione o no la red.
  *
  * No simula mediciones: solo reporta lo que lee de sus pines o recibe por Serial.
@@ -18,6 +18,7 @@
  * circuito real: pines IR, nivel activo, direccion I2C y pines SDA/SCL.
  */
 #include <WiFi.h>
+#include <WebServer.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -29,6 +30,11 @@
 // de los sensores IR, la cola ni la LCD: mejor un error claro que decenas confusas.
 #if !defined(IR_PIN_ESTACION_1) || !defined(COLA_RANURAS) || !defined(LCD_ENABLED)
 #error "config.h esta desactualizado: vuelve a copiarlo de config.h.example y rellena tus datos."
+#endif
+
+// Valor por defecto para un config.h anterior a esta constante (ver config.h.example).
+#ifndef IR_SALIDA_ESTABLE_MS
+#define IR_SALIDA_ESTABLE_MS 250UL
 #endif
 
 #if LCD_ENABLED
@@ -47,15 +53,47 @@ SET_LOOP_TASK_STACK_SIZE(12 * 1024);
 // Sin hora valida no se puede comprobar la vigencia del certificado TLS.
 const time_t HORA_MINIMA_VALIDA = 1735689600;
 
+// La web local funciona aun sin Internet. El envio a MAGLEV se habilita cuando
+// WiFi, API y credenciales esten configurados en config.h.
+WebServer localServer(80);
+bool cloudConfigurada = false;
+unsigned long eventosLocales = 0;
+int ultimoHttpCodigo = 0;
+unsigned long ultimoHttpCorrectoMs = 0;
 String inputLine;
 bool descartandoLinea = false;
-unsigned long ultimoEnvio = 0, ultimoWifi = 0, ultimaMuestraSolar = 0;
+unsigned long ultimoWifi = 0, ultimaMuestraSolar = 0;
+
+// El envio HTTPS corre en su propia tarea de FreeRTOS, en el nucleo 0, para que un
+// intento lento o fallido (hasta ~18 s entre handshake TLS y espera de respuesta)
+// nunca bloquee loop() (nucleo 1): sensores IR, LCD y web local siguen atendidos
+// en todo momento. colaMutex protege la cola, que ahora escriben AMBOS nucleos
+// (loop() al encolar, la tarea de red al desencolar).
+SemaphoreHandle_t colaMutex = nullptr;
+TaskHandle_t tareaRedHandle = nullptr;
+unsigned long ultimoEnvio = 0;
 unsigned long reintentoMs = INTERVALO_MIN_ENVIO_MS;
+// Conexion HTTPS PERSISTENTE (keep-alive). Antes se creaba un cliente TLS nuevo por
+// mensaje y el handshake (~1 s en el ESP32) dominaba el envio: medido con el tren en
+// marcha, ~1,6 s por mensaje, menos de lo que el tren genera, y la cola se llenaba.
+// Ahora el handshake se paga una vez y la conexion se reutiliza. Ambos objetos deben
+// vivir fuera de la funcion de envio: el destructor de HTTPClient cierra el socket.
+// Solo los toca tareaRed (nucleo 0).
+WiFiClientSecure tlsCliente;
+HTTPClient httpCliente;
+bool tlsConfigurado = false;
+char ultimoTlsError[128] = "";
 
 // Ultimas lecturas solares, para la LCD. solarValido evita mostrar ceros inventados.
 float ultimoPanel = 0.0f, ultimaBateria = 0.0f;
 int ultimoPorcentaje = 0;
 bool solarValido = false;
+// Muestra solar tomada con la cola ocupada: no gasta un envio propio, viaja dentro
+// del siguiente evento de tren (la API admite ambos bloques en un mismo mensaje).
+// Solo la usa loop() (nucleo 1).
+bool solarPendiente = false;
+float solarPendPanel = 0.0f, solarPendBateria = 0.0f;
+int solarPendNivel = 0;
 
 // ---------------------------------------------------------------------------
 // Cola FIFO de mensajes pendientes
@@ -65,22 +103,14 @@ bool solarValido = false;
 // estatica (sin malloc, para no fragmentar el heap que necesita el handshake TLS).
 // Dimensionado: COLA_RANURAS=16 x COLA_BYTES_POR_RANURA=384 B ~= 6,2 KiB estaticos.
 // Un ESP32 tiene 320 KiB de DRAM y deja ~150-200 KiB de heap libre con WiFi+TLS
-// activos, asi que 6 KiB es despreciable; a 1 mensaje/s la cola cubre ~16 s de
+// activos, asi que 6 KiB es despreciable; a 1 mensaje/400 ms la cola cubre ~6,4 s de
 // atasco de red, suficiente para una reconexion WiFi tipica. Subirla cuesta RAM
 // lineal: comprobar con ESP.getFreeHeap() antes de pasar de ~64 ranuras.
 enum ClaseMensaje : uint8_t { CLASE_TREN = 0, CLASE_SOLAR = 1, CLASE_SERIAL = 2 };
 struct Ranura { char json[COLA_BYTES_POR_RANURA]; uint8_t clase; };
 Ranura cola[COLA_RANURAS];
 uint16_t colaInicio = 0, colaUsadas = 0;
-unsigned long colaDescartados = 0, colaSolarOmitidas = 0;
-bool avisoSolarEmitido = false;
-
-uint16_t colaSolaresEnEspera() {
-  uint16_t n = 0;
-  for (uint16_t i = 0; i < colaUsadas; i++)
-    if (cola[(colaInicio + i) % COLA_RANURAS].clase == CLASE_SOLAR) n++;
-  return n;
-}
+unsigned long colaDescartados = 0;
 
 void colaQuitarFrente() {
   if (!colaUsadas) return;
@@ -96,6 +126,8 @@ void aplicarBackoff() {
 
 // Encola una copia del JSON ya serializado. Devuelve false e informa SIEMPRE por
 // Serial cuando descarta algo: nunca se pierde un mensaje en silencio.
+// Se llama desde loop() (nucleo 1); toma colaMutex porque la tarea de red (nucleo 0)
+// lee y modifica la misma cola al desencolar.
 bool colaEmpujar(const char* json, uint8_t clase) {
   const size_t len = strlen(json);
   if (len + 1 > COLA_BYTES_POR_RANURA) {
@@ -103,19 +135,7 @@ bool colaEmpujar(const char* json, uint8_t clase) {
                   (unsigned)len, (unsigned)COLA_BYTES_POR_RANURA);
     return false;
   }
-  // Las muestras solares son periodicas y la siguiente sustituye a la anterior:
-  // se limita su acumulacion para que un corte de red no llene la cola y deje
-  // sin sitio a los eventos de tren, que son irrepetibles.
-  if (clase == CLASE_SOLAR && colaSolaresEnEspera() >= COLA_MAX_SOLAR_EN_ESPERA) {
-    colaSolarOmitidas++;
-    if (!avisoSolarEmitido) {
-      avisoSolarEmitido = true;
-      Serial.printf("COLA: ya hay %u muestras solares en espera; se omiten las nuevas "
-                    "hasta vaciar (omitidas en total: %lu).\n",
-                    (unsigned)COLA_MAX_SOLAR_EN_ESPERA, colaSolarOmitidas);
-    }
-    return false;
-  }
+  xSemaphoreTake(colaMutex, portMAX_DELAY);
   if (colaUsadas >= COLA_RANURAS) {
     // Se prefiere perder lo mas antiguo antes que rechazar una deteccion nueva.
     // Riesgo real: puede desaparecer una llegada y sobrevivir su salida, de modo
@@ -131,7 +151,7 @@ bool colaEmpujar(const char* json, uint8_t clase) {
   memcpy(cola[destino].json, json, len + 1);
   cola[destino].clase = clase;
   colaUsadas++;
-  if (clase == CLASE_SOLAR) avisoSolarEmitido = false;
+  xSemaphoreGive(colaMutex);
   return true;
 }
 
@@ -157,10 +177,22 @@ void dropNullMembers(JsonObject obj) {
   }
 }
 
+void agregarBloqueSolar(JsonDocument& doc, float panel, float bateria, int nivel) {
+  JsonObject s = doc["solar_station"].to<JsonObject>();
+  s["panel_voltage"] = panel;
+  s["battery_voltage"] = bateria;
+  // battery_level es una ESTIMACION a partir del voltaje en reposo, no una medida
+  // directa de la carga: la curva Li-ion se desplaza con la corriente y la temperatura.
+  s["battery_level"] = nivel;
+  // panel_current y power_output se omiten a proposito: no hay sensor de corriente.
+}
+
 // Asigna el sample_id definitivo, serializa y encola. El sample_id se fija AQUI y
 // viaja dentro de la ranura, asi que todos los reintentos reenvian el mismo:
 // la API responde 201 la primera vez y 200 (duplicada) si ya lo tenia.
 bool encolarDocumento(JsonDocument& doc, uint8_t clase) {
+  // Sin la configuracion remota no se llena una cola destinada a Internet.
+  if (!cloudConfigurada) return false;
   doc["sample_id"] = newSampleId();
   const size_t necesarios = measureJson(doc);
   if (necesarios + 1 > COLA_BYTES_POR_RANURA) {
@@ -179,16 +211,21 @@ bool encolarDocumento(JsonDocument& doc, uint8_t clase) {
 // Biblioteca: "LiquidCrystal I2C" de Frank de Brabander (ver esp32/README.md).
 // Si no esta instalada, poner LCD_ENABLED en 0 en config.h: el resto del firmware
 // compila y funciona igual, solo se queda sin pantalla.
+// Retencion LOCAL de la estacion, independiente de la latencia de Internet.
+// Se prioriza estacion 1 > 2 > 3 como en el programa original.
+const unsigned long RETENCION_ESTACION_MS = 5000UL;
+uint8_t estacionVisible = 0;
+uint8_t ultimaEstacionVisible = 0;
+bool estacionSensorActivo = false;
+unsigned long instanteSalidaVisible = 0;
+
 #if LCD_ENABLED
 LiquidCrystal_I2C lcd(LCD_DIRECCION_I2C, 16, 2);
 bool lcdPresente = false;
 char lcdLineas[2][17] = {"", ""};
-char lcdEventoL1[17] = "", lcdEventoL2[17] = "";
-bool lcdEventoPendiente = false, lcdMostrandoEvento = false, lcdEstadoAlterno = false;
-unsigned long lcdEventoDesde = 0, lcdUltimoRefresco = 0;
 #endif
 
-// Escribe solo las lineas que cambian: sin lcd.clear() no hay parpadeo.
+// Escribe solo si cambia el contenido. Evita parpadeos.
 void lcdEscribir(const char* l1, const char* l2) {
 #if LCD_ENABLED
   if (!lcdPresente) return;
@@ -202,52 +239,14 @@ void lcdEscribir(const char* l1, const char* l2) {
 #endif
 }
 
-// Se llama desde la deteccion local, antes de encolar nada: la pantalla muestra el
-// evento aunque no haya WiFi o la API devuelva error.
-void mostrarEventoLcd(uint8_t estacion, bool presencia) {
-#if LCD_ENABLED
-  snprintf(lcdEventoL1, sizeof(lcdEventoL1), "%s", presencia ? "TREN DETECTADO" : "TREN SALIO");
-  snprintf(lcdEventoL2, sizeof(lcdEventoL2), "ESTACION %u", (unsigned)estacion);
-  // Solo se guarda el evento mas reciente: si llegan dos en menos de
-  // LCD_MS_MINIMO_EVENTO, el intermedio no se pinta (si queda en el log Serial).
-  lcdEventoPendiente = true;
-#else
-  (void)estacion; (void)presencia;
-#endif
-}
-
 void atenderLcd(unsigned long ahora) {
+  (void)ahora;
 #if LCD_ENABLED
   if (!lcdPresente) return;
-  // Un evento nuevo espera a que el anterior haya estado LCD_MS_MINIMO_EVENTO en
-  // pantalla, para que se pueda leer.
-  if (lcdEventoPendiente &&
-      (!lcdMostrandoEvento || (unsigned long)(ahora - lcdEventoDesde) >= LCD_MS_MINIMO_EVENTO)) {
-    lcdEscribir(lcdEventoL1, lcdEventoL2);
-    lcdEventoPendiente = false; lcdMostrandoEvento = true; lcdEventoDesde = ahora;
-    return;
-  }
-  if (lcdMostrandoEvento) {
-    if ((unsigned long)(ahora - lcdEventoDesde) < LCD_MS_RETENER_EVENTO) return;
-    lcdMostrandoEvento = false;
-  }
-  if ((unsigned long)(ahora - lcdUltimoRefresco) < LCD_MS_REFRESCO_ESTADO) return;
-  lcdUltimoRefresco = ahora;
-  lcdEstadoAlterno = !lcdEstadoAlterno;
-  char l1[17], l2[17];
-  // colaUsadas nunca pasa de COLA_RANURAS, pero se acota a dos digitos para que la
-  // linea quepa siempre en las 16 columnas sin que snprintf tenga que truncarla.
-  snprintf(l1, sizeof(l1), "WiFi:%-2s Cola:%u",
-           WiFi.status() == WL_CONNECTED ? "OK" : "NO",
-           (unsigned)(colaUsadas > 99 ? 99 : colaUsadas));
-  // La segunda linea alterna bateria y panel cada LCD_MS_REFRESCO_ESTADO: el cambio
-  // es lo bastante lento para leerse y lcdEscribir() solo reescribe lo que cambia.
-  if (!solarValido) snprintf(l2, sizeof(l2), "Leyendo ADC...");
-  else if (lcdEstadoAlterno) snprintf(l2, sizeof(l2), "Bat %.2fV %3d%%", ultimaBateria, ultimoPorcentaje);
-  else snprintf(l2, sizeof(l2), "Panel %.2f V", ultimoPanel);
-  lcdEscribir(l1, l2);
-#else
-  (void)ahora;
+  char linea[17];
+  if (estacionVisible) snprintf(linea, sizeof(linea), "ESTACION %u", (unsigned)estacionVisible);
+  else snprintf(linea, sizeof(linea), "SIN OBSTACULOS");
+  lcdEscribir("SISTEMA ACTIVO", linea);
 #endif
 }
 
@@ -276,6 +275,9 @@ void iniciarLcd() {
   lcd.init(); lcd.backlight(); lcd.clear();
   lcdLineas[0][0] = '\0'; lcdLineas[1][0] = '\0'; // la pantalla esta en blanco: invalidar cache
   lcdEscribir("MAGLEV MONITOR", "Iniciando...");
+  // Sin esta pausa el resto de setup() (sensores, WiFi, servidor local) termina en
+  // milisegundos y sobreescribe el mensaje casi de inmediato: no da tiempo a leerlo.
+  delay(1500);
   Serial.printf("LCD 1602 I2C inicializada en 0x%02X.\n", (unsigned)LCD_DIRECCION_I2C);
 #endif
 }
@@ -290,7 +292,7 @@ const int IR_PINS[IR_ESTACIONES] = { IR_PIN_ESTACION_1, IR_PIN_ESTACION_2, IR_PI
 
 // La ISR solo deja constancia del ultimo flanco: nivel, instante y numero de flancos.
 // Sirve para recuperar el instante REAL de una transicion ocurrida mientras loop()
-// estaba bloqueado dentro de un POST (HTTPClient es bloqueante).
+// estaba ocupado (lectura ADC, LCD, Serial). El POST ya no lo bloquea: va en tareaRed.
 portMUX_TYPE irMux = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t irFlancoMs[IR_ESTACIONES];
 volatile uint8_t irFlancoNivel[IR_ESTACIONES];
@@ -351,7 +353,7 @@ void registrarTransicion(uint8_t i, bool presencia, unsigned long instanteMs) {
   }
   irUltimaTransicionMs[i] = instanteMs;
   // La pantalla se actualiza antes de encolar: muestra el evento haya red o no.
-  mostrarEventoLcd(i + 1, presencia);
+  if (presencia) eventosLocales++;
   // train_status es estricto: exactamente station_number (entero 1-3) y detected.
   // No se envia sampled_at: el instante fiable que tiene el ESP32 es millis(), no una
   // fecha. Los eventos que salen de la cola tras un corte quedan sellados por el
@@ -360,6 +362,11 @@ void registrarTransicion(uint8_t i, bool presencia, unsigned long instanteMs) {
   JsonObject ts = doc["train_status"].to<JsonObject>();
   ts["station_number"] = (int)(i + 1);
   ts["detected"] = presencia;
+  if (solarPendiente) {
+    // La ultima muestra solar aplazada viaja en este mismo mensaje: un envio menos.
+    agregarBloqueSolar(doc, solarPendPanel, solarPendBateria, solarPendNivel);
+    solarPendiente = false;
+  }
   encolarDocumento(doc, CLASE_TREN);
 }
 
@@ -387,21 +394,48 @@ void revisarSensoresIR(unsigned long ahora) {
           (unsigned long)(ahora - irUltimoAvisoMs[i]) >= IR_MS_ENTRE_AVISOS) {
         irUltimoAvisoMs[i] = ahora;
         Serial.printf("AVISO IR: %u flancos en estacion %u sin cambio neto de estado; "
-                      "puede ser ruido del cableado o un paso completo no visto "
-                      "(loop() bloqueado en un POST).\n",
+                      "puede ser ruido del cableado o un pulso mas corto que una "
+                      "vuelta de loop() (p. ej. ocupado escribiendo por Serial).\n",
                       (unsigned)nuevos, (unsigned)(i + 1));
       }
     }
 
     if (presenciaAhora != irCrudo[i]) { irCrudo[i] = presenciaAhora; irCrudoDesde[i] = instante; }
-    // Antirrebote: el nivel debe mantenerse IR_ANTIRREBOTE_MS antes de darse por bueno.
-    // Efecto colateral asumido: una presencia o ausencia mas corta que ese tiempo
-    // no se notifica. Las restas se hacen siempre sobre unsigned long.
+    // Antirrebote asimetrico. La LLEGADA se confirma tras IR_ANTIRREBOTE_MS; la SALIDA
+    // exige IR_SALIDA_ESTABLE_MS sin presencia. Medido con el tren en marcha: la
+    // estacion 2 veia el mismo paso como dos pulsos (72 ms, hueco de ~80 ms, 190 ms)
+    // en TODAS las vueltas, es decir, dos llegadas por cada paso real. Con el filtro,
+    // un hueco mas corto que IR_SALIDA_ESTABLE_MS no parte el paso en dos.
+    // Efectos asumidos: una presencia mas corta que IR_ANTIRREBOTE_MS no se notifica,
+    // la salida se notifica IR_SALIDA_ESTABLE_MS tarde (su instante registrado sigue
+    // siendo el real) y dos pasos separados por menos de ese tiempo se verian como uno.
+    const unsigned long estableMs = presenciaAhora ? IR_ANTIRREBOTE_MS : IR_SALIDA_ESTABLE_MS;
     if (presenciaAhora != irEstable[i] &&
-        (unsigned long)(ahora - irCrudoDesde[i]) >= IR_ANTIRREBOTE_MS) {
+        (unsigned long)(ahora - irCrudoDesde[i]) >= estableMs) {
       irEstable[i] = presenciaAhora;
       registrarTransicion(i, presenciaAhora, irCrudoDesde[i]);
     }
+  }
+}
+
+// Los eventos enviados a Supabase siguen siendo llegadas/salidas reales de
+// cada sensor. La prioridad 1 > 2 > 3 se aplica a lo que ve el usuario en LCD
+// y web local, igual que en el codigo original.
+void actualizarEstacionVisible(unsigned long ahora) {
+  uint8_t prioritaria = 0;
+  for (uint8_t i = 0; i < IR_ESTACIONES; i++) {
+    if (irEstable[i]) { prioritaria = i + 1; break; }
+  }
+  if (prioritaria) {
+    estacionVisible = prioritaria;
+    ultimaEstacionVisible = prioritaria;
+    estacionSensorActivo = true;
+  } else if (estacionSensorActivo) {
+    estacionSensorActivo = false;
+    instanteSalidaVisible = ahora;
+  } else if (estacionVisible &&
+             (unsigned long)(ahora - instanteSalidaVisible) >= RETENCION_ESTACION_MS) {
+    estacionVisible = 0;
   }
 }
 
@@ -474,17 +508,141 @@ void sampleSolarStation() {
   }
   const int porcentaje = porcentajeBateria(bateria);
   ultimoPanel = panel; ultimaBateria = bateria; ultimoPorcentaje = porcentaje; solarValido = true;
-  Serial.printf("SOLAR: panel %.2f V, bateria %.2f V, nivel estimado %d %%.\n",
-                panel, bateria, porcentaje);
+  // Heap libre y mayor bloque contiguo en cada muestra (ritmo fijo, independiente
+  // del exito/fallo del envio): sirve para ver si la memoria se va fragmentando con
+  // el tiempo, lo que haria fallar el handshake TLS aunque el certificado este bien.
+  Serial.printf("SOLAR: panel %.2f V, bateria %.2f V, nivel estimado %d %%. "
+                "Heap libre %u B, mayor bloque %u B.\n",
+                panel, bateria, porcentaje,
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  // Con mensajes esperando, la muestra no se encola: los eventos de tren son
+  // irrepetibles y la solar es periodica. Queda como "pendiente" y sale dentro del
+  // siguiente evento de tren; si antes llega otra muestra, la sustituye. Con la cola
+  // vacia (tren parado o red al dia) se envia sola, como siempre.
+  xSemaphoreTake(colaMutex, portMAX_DELAY);
+  const bool colaOcupada = colaUsadas > 0;
+  xSemaphoreGive(colaMutex);
+  if (colaOcupada) {
+    solarPendPanel = panel; solarPendBateria = bateria; solarPendNivel = porcentaje;
+    solarPendiente = true;
+    return;
+  }
+  solarPendiente = false;
   JsonDocument doc;
-  JsonObject s = doc["solar_station"].to<JsonObject>();
-  s["panel_voltage"] = panel;
-  s["battery_voltage"] = bateria;
-  // battery_level es una ESTIMACION a partir del voltaje en reposo, no una medida
-  // directa de la carga: la curva Li-ion se desplaza con la corriente y la temperatura.
-  s["battery_level"] = porcentaje;
-  // panel_current y power_output se omiten a proposito: no hay sensor de corriente.
+  agregarBloqueSolar(doc, panel, bateria, porcentaje);
   encolarDocumento(doc, CLASE_SOLAR);
+}
+
+// ---------------------------------------------------------------------------
+// Web local: no requiere acceso a Internet ni credenciales de Supabase.
+// Abrir http://192.168.4.1 conectado a la red propia del ESP32.
+// ---------------------------------------------------------------------------
+const char HTML_LOCAL[] PROGMEM = R"MAGLEVWEB(
+<!doctype html>
+<html lang="es"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MAGLEV · Monitor local</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,Arial,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#14354d,#07101b 65%);color:#eaf4ff}
+main{max-width:900px;margin:auto;padding:24px 16px 36px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:clamp(19px,4vw,26px);margin:0}small,.sub{color:#9cb1c9}
+.pill{border:1px solid #226c58;border-radius:999px;padding:8px 12px;background:#143a31;color:#80efc2;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+article{border:1px solid #294054;background:#162739;border-radius:20px;padding:21px}
+.t{font-size:14px;color:#c5d8ec;font-weight:600}.value{font-size:clamp(29px,6vw,44px);font-weight:800;margin:16px 0}
+.sun{color:#facc15}.bat{color:#4ade80}.full{grid-column:1/-1}
+.bar{background:#33475a;border-radius:20px;height:13px;overflow:hidden}.fill{background:#4ade80;width:0;height:100%;transition:width .3s}
+.stations{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:18px}
+.st{border:1px solid #3c5065;border-radius:14px;text-align:center;padding:17px 6px;background:#1c3043;transition:background .2s}
+.st.on{border-color:#3ad5ff;background:#114962}.st.detect{border-color:#4ade80;background:#15503f}
+.st strong{display:block;font-size:13px}.st .status{font-size:11px;color:#aebfd2;margin-top:7px}
+.st.on .status{color:#8be6ff}.st.detect .status{color:#9df4b3}
+.row{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #2a4054;padding:11px 0;font-size:13px}
+.row span:first-child{color:#aabdd1}.row span:last-child{text-align:right}
+footer{text-align:center;font-size:12px;color:#aabdd1;line-height:1.7;margin:22px 0}
+@media(max-width:490px){article{padding:15px}.st{padding:13px 4px}.st strong{font-size:11px}}
+</style></head><body><main>
+<header><div><h1>🚆 MAGLEV SMART MONITOR</h1><div class="sub">Monitor local · ESP32</div></div>
+<span id="conexion" class="pill">Conectando...</span></header>
+<div class="grid">
+<article><div class="t">☀ PANEL SOLAR</div><div id="panel" class="value sun">-- V</div><small>Voltaje del panel</small></article>
+<article><div class="t">🔋 BATERÍA 18650</div><div id="bat" class="value bat">-- V</div>
+<div class="bar"><div id="fill" class="fill"></div></div><small id="pct">Carga estimada: --%</small></article>
+<article class="full"><div class="t">🚉 ESTACIONES · PRIORIDAD 1 → 2 → 3</div>
+<div class="stations"><div class="st" id="e1"><strong>ESTACIÓN 1</strong><div class="status" id="s1">Libre</div></div>
+<div class="st" id="e2"><strong>ESTACIÓN 2</strong><div class="status" id="s2">Libre</div></div>
+<div class="st" id="e3"><strong>ESTACIÓN 3</strong><div class="status" id="s3">Libre</div></div></div>
+<div class="row"><span>Estación mostrada</span><span id="actual">SIN OBSTÁCULOS</span></div>
+<div class="row"><span>Última estación detectada</span><span id="ultima">NINGUNA</span></div>
+<div class="row"><span>Tiempo restante en LCD</span><span id="resto">—</span></div>
+<div class="row"><span>Detecciones desde encendido</span><span id="eventos">0</span></div></article>
+<article class="full"><div class="t">📡 ESTADO DEL SISTEMA</div>
+<div class="row"><span>WiFi del router</span><span id="wifi">—</span></div>
+<div class="row"><span>Envío HTTPS a MAGLEV</span><span id="cloud">—</span></div>
+<div class="row"><span>Última respuesta HTTP</span><span id="http">—</span></div>
+<div class="row"><span>Mensajes pendientes</span><span id="cola">0</span></div></article>
+</div><footer>Datos leídos del ESP32 · Actualización cada 0,5 s<br>
+La retención del nombre no significa que el tren siga frente al sensor.</footer>
+</main><script>
+const el=id=>document.getElementById(id);let ocupado=false;
+async function actualizar(){if(ocupado)return;ocupado=true;try{
+const r=await fetch('/datos',{cache:'no-store'});if(!r.ok)throw Error('HTTP');const d=await r.json();
+el('conexion').textContent='● Conectado al ESP32';
+el('panel').textContent=d.panel===null?'-- V':d.panel.toFixed(2)+' V';
+el('bat').textContent=d.bateria===null?'-- V':d.bateria.toFixed(2)+' V';
+el('fill').style.width=d.porcentaje===null?'0%':d.porcentaje+'%';
+el('pct').textContent='Carga estimada: '+(d.porcentaje===null?'--':d.porcentaje)+'%';
+el('actual').textContent=d.estacion?'ESTACIÓN '+d.estacion:'SIN OBSTÁCULOS';
+el('ultima').textContent=d.ultima?'ESTACIÓN '+d.ultima:'NINGUNA';
+el('resto').textContent=d.detectando?'Sensor activo':d.restanteMs?(d.restanteMs/1000).toFixed(1)+' s':'—';
+el('eventos').textContent=d.eventos;el('wifi').textContent=d.wifi?'Conectado':'Sin router';
+el('cloud').textContent=d.cloud?'Configurado':'Pendiente';el('http').textContent=d.ultimoHttp===null?'Sin envíos':'HTTP '+d.ultimoHttp;el('cola').textContent=d.cola;
+for(let i=1;i<=3;i++){const n=el('e'+i);n.className='st'+(d.estacion===i?(d.detectando?' detect':' on'):'');
+el('s'+i).textContent=d.estacion===i?(d.detectando?'Detectando':'Retenido 5 s'):'Libre';}
+}catch(e){el('conexion').textContent='● Sin comunicación con ESP32';}finally{ocupado=false;}}
+actualizar();setInterval(actualizar,500);
+</script></body></html>
+)MAGLEVWEB";
+
+void enviarDatosLocales() {
+  unsigned long resto = 0;
+  if (!estacionSensorActivo && estacionVisible) {
+    const unsigned long tiempo = (unsigned long)(millis() - instanteSalidaVisible);
+    if (tiempo < RETENCION_ESTACION_MS) resto = RETENCION_ESTACION_MS - tiempo;
+  }
+  JsonDocument doc;
+  if (solarValido) {
+    doc["panel"] = ultimoPanel;
+    doc["bateria"] = ultimaBateria;
+    doc["porcentaje"] = ultimoPorcentaje;
+  } else {
+    doc["panel"] = nullptr; doc["bateria"] = nullptr; doc["porcentaje"] = nullptr;
+  }
+  doc["estacion"] = estacionVisible;
+  doc["ultima"] = ultimaEstacionVisible;
+  doc["detectando"] = estacionSensorActivo;
+  doc["restanteMs"] = resto;
+  doc["eventos"] = eventosLocales;
+  doc["wifi"] = (WiFi.status() == WL_CONNECTED);
+  doc["cloud"] = cloudConfigurada;
+  if (ultimoHttpCodigo) doc["ultimoHttp"] = ultimoHttpCodigo;
+  else doc["ultimoHttp"] = nullptr;
+  doc["cola"] = colaUsadas;
+  String salida;
+  serializeJson(doc, salida);
+  localServer.sendHeader("Cache-Control", "no-store");
+  localServer.send(200, "application/json", salida);
+}
+
+void iniciarServidorLocal() {
+  localServer.on("/", HTTP_GET, []() {
+    localServer.send_P(200, "text/html; charset=utf-8", HTML_LOCAL);
+  });
+  localServer.on("/datos", HTTP_GET, enviarDatosLocales);
+  localServer.onNotFound([]() { localServer.send(404, "text/plain", "No encontrado"); });
+  localServer.begin();
 }
 
 // ---------------------------------------------------------------------------
@@ -530,33 +688,71 @@ void leerSerial() {
 }
 
 // ---------------------------------------------------------------------------
-// Envio HTTPS del frente de la cola
+// Envio HTTPS del frente de la cola — corre en tareaRed (nucleo 0), nunca en loop().
 // ---------------------------------------------------------------------------
-void enviarFrenteDeCola() {
-  WiFiClientSecure tls;
-  tls.setCACert(ROOT_CA); // verificacion TLS real: nunca setInsecure()
-  tls.setHandshakeTimeout(TLS_HANDSHAKE_S); // segundos; el defecto (120 s) bloquea loop()
-  HTTPClient http;
-  http.setConnectTimeout(HTTP_TIMEOUT_MS);
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(tls, API_URL)) {
-    ultimoEnvio = millis(); aplicarBackoff();
-    Serial.println("REINTENTO: no se pudo iniciar la conexion HTTPS.");
-    return;
+// Un POST sobre la conexion persistente. Devuelve el codigo HTTP (o el negativo de
+// HTTPClient) e indica si iba sobre una conexion ya abierta. Ante un error de red
+// cierra el socket, para que el siguiente intento empiece con un handshake limpio.
+int postTelemetria(const char* mensaje, bool& reutilizada) {
+  if (!tlsConfigurado) {
+    tlsCliente.setCACert(ROOT_CA); // verificacion TLS real: nunca setInsecure()
+    tlsCliente.setHandshakeTimeout(TLS_HANDSHAKE_S); // segundos
+    httpCliente.setReuse(true);
+    tlsConfigurado = true;
   }
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
-  http.addHeader("X-Device-Id", DEVICE_ID);
-  const int code = http.POST(String(cola[colaInicio].json));
-  http.end();
-  // El limite de 1 mensaje/s se mide desde que TERMINA el POST: mas conservador que
+  reutilizada = tlsCliente.connected();
+  httpCliente.setConnectTimeout(HTTP_TIMEOUT_MS);
+  httpCliente.setTimeout(HTTP_TIMEOUT_MS);
+  if (!httpCliente.begin(tlsCliente, API_URL)) return 0;
+  httpCliente.addHeader("Content-Type", "application/json");
+  httpCliente.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
+  httpCliente.addHeader("X-Device-Id", DEVICE_ID);
+  const int code = httpCliente.POST(String(mensaje));
+  // Leer el cuerpo (pocos bytes) deja la conexion limpia para el siguiente mensaje.
+  if (code > 0) httpCliente.getString();
+  httpCliente.end(); // con keep-alive no cierra el socket; solo limpia la peticion
+  if (code < 0) {
+    ultimoTlsError[0] = '\0';
+    tlsCliente.lastError(ultimoTlsError, sizeof(ultimoTlsError));
+    tlsCliente.stop();
+  }
+  return code;
+}
+
+void enviarFrenteDeCola() {
+  // Copiar el mensaje del frente bajo mutex: el POST (y el handshake TLS cuando toca
+  // abrir conexion) no necesitan tener la cola bloqueada, y loop() sigue pudiendo
+  // encolar mientras tanto.
+  char mensaje[COLA_BYTES_POR_RANURA];
+  xSemaphoreTake(colaMutex, portMAX_DELAY);
+  snprintf(mensaje, sizeof(mensaje), "%s", cola[colaInicio].json);
+  xSemaphoreGive(colaMutex);
+
+  bool reutilizada = false;
+  int code = postTelemetria(mensaje, reutilizada);
+  if (code < 0 && reutilizada) {
+    // El servidor o el router cerraron la conexion mientras estaba en reposo: es lo
+    // normal en keep-alive y no indica un fallo de red. Se reintenta UNA vez, ya con
+    // conexion nueva. Es seguro: el sample_id es el mismo, asi que si el primer
+    // intento si llego, la API responde 200 (duplicada) y no registra dos veces.
+    Serial.printf("RED: la conexion reutilizada se habia cerrado (%d, %s); se abre otra.\n",
+                  code, httpCliente.errorToString(code).c_str());
+    code = postTelemetria(mensaje, reutilizada);
+  }
+  ultimoHttpCodigo = code;
+  if (code == 200 || code == 201) ultimoHttpCorrectoMs = millis();
+  // El limite de INTERVALO_MIN_ENVIO_MS se mide desde que TERMINA el POST: mas conservador que
   // la ventana del servidor, que la mide entre mensajes aceptados.
   ultimoEnvio = millis();
   if (code == 201 || code == 200) {
-    Serial.printf("OK %d: %s (quedan %u en cola).\n",
+    xSemaphoreTake(colaMutex, portMAX_DELAY);
+    colaQuitarFrente();
+    const unsigned enCola = colaUsadas;
+    xSemaphoreGive(colaMutex);
+    Serial.printf("OK %d: %s (quedan %u en cola). Heap libre %u B, mayor bloque %u B.\n",
                   code, code == 200 ? "duplicada, ya estaba registrada" : "registrada",
-                  (unsigned)(colaUsadas - 1));
-    colaQuitarFrente(); reintentoMs = INTERVALO_MIN_ENVIO_MS;
+                  enCola, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    reintentoMs = INTERVALO_MIN_ENVIO_MS;
   } else if (code == 429) {
     // Limite de ritmo: el mensaje sigue siendo valido. Se conserva su sample_id y se
     // reintenta con una espera fija; no hace falta backoff exponencial.
@@ -565,65 +761,133 @@ void enviarFrenteDeCola() {
   } else if (code >= 400 && code < 500) {
     // 400 formato/rango, 401 credenciales, 403 dispositivo inactivo, 413 tamano,
     // 415 content-type: rechazos definitivos, reintentar no cambiaria el resultado.
-    Serial.printf("ERROR HTTP %d: rechazo definitivo, mensaje descartado -> %s\n",
-                  code, cola[colaInicio].json);
-    colaQuitarFrente(); reintentoMs = INTERVALO_MIN_ENVIO_MS;
+    Serial.printf("ERROR HTTP %d: rechazo definitivo, mensaje descartado -> %s\n", code, mensaje);
+    xSemaphoreTake(colaMutex, portMAX_DELAY);
+    colaQuitarFrente();
+    xSemaphoreGive(colaMutex);
+    reintentoMs = INTERVALO_MIN_ENVIO_MS;
+  } else if (code == 0) {
+    Serial.println("REINTENTO: no se pudo iniciar la conexion HTTPS.");
+    aplicarBackoff();
   } else {
     // 5xx o error de red (codigo negativo de HTTPClient): se conserva el sample_id,
     // asi que un reintento tras una respuesta perdida da 200 y no duplica el registro.
-    Serial.printf("REINTENTO HTTP %d: se conserva el sample_id (%u en cola).\n",
-                  code, (unsigned)colaUsadas);
+    // Diagnostico: un codigo negativo no dice POR QUE fallo (DNS, TLS, red); se
+    // imprime el texto de HTTPClient y, si hubo intento de TLS, el ultimo error de
+    // mbedTLS para distinguir "no hay ruta a Internet" de "certificado rechazado".
+    const char* tlsErr = code < 0 ? ultimoTlsError : "";
+    Serial.printf("REINTENTO HTTP %d (%s)%s%s: se conserva el sample_id (%u en cola). "
+                  "IP local %s, gateway %s, DNS %s, RSSI %d dBm. Heap libre %u B, mayor bloque %u B.\n",
+                  code, httpCliente.errorToString(code).c_str(),
+                  tlsErr[0] ? " | TLS: " : "", tlsErr,
+                  (unsigned)colaUsadas,
+                  WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
+                  WiFi.dnsIP(0).toString().c_str(), (int)WiFi.RSSI(),
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     aplicarBackoff();
   }
-  // Durante el POST loop() estuvo bloqueado. La ISR guardo el instante de los
-  // flancos, asi que se atiende lo ocurrido en ese hueco en cuanto se vuelve.
-  revisarSensoresIR(millis());
+}
+
+// ---------------------------------------------------------------------------
+// Tarea de red (nucleo 0): revisa la cola y envia sin bloquear loop() (nucleo 1).
+// ---------------------------------------------------------------------------
+void tareaRed(void* parametro) {
+  (void)parametro;
+  for (;;) {
+    const unsigned long ahora = millis();
+    bool debeEnviar = false;
+    if (cloudConfigurada && WiFi.status() == WL_CONNECTED &&
+        (unsigned long)(ahora - ultimoEnvio) >= reintentoMs &&
+        time(nullptr) >= HORA_MINIMA_VALIDA) {
+      xSemaphoreTake(colaMutex, portMAX_DELAY);
+      debeEnviar = colaUsadas > 0;
+      xSemaphoreGive(colaMutex);
+    }
+    if (debeEnviar) enviarFrenteDeCola();
+    else vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 // ---------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   inputLine.reserve(SERIAL_MAX_LINEA + 1);
-  if (!strlen(WIFI_SSID) || !strlen(DEVICE_ID) || !strlen(DEVICE_TOKEN) || strlen(ROOT_CA) < 100 || !String(API_URL).startsWith("https://")) {
-    Serial.println("Completa config.h: WiFi, HTTPS, dispositivo, clave y certificado CA.");
-    while (true) delay(1000);
-  }
+  colaMutex = xSemaphoreCreateMutex();
+
+  // Se permite el modo local sin credenciales de Internet.
+  cloudConfigurada = strlen(WIFI_SSID) > 0 && strlen(DEVICE_ID) > 0 &&
+    strlen(DEVICE_TOKEN) > 0 && strlen(ROOT_CA) > 100 &&
+    String(API_URL).startsWith("https://");
+
   iniciarLcd();
   iniciarSensoresIR();
   analogReadResolution(12);
   analogSetPinAttenuation(PIN_PANEL, ADC_11db);
   analogSetPinAttenuation(PIN_BATERIA, ADC_11db);
-  WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
+
+  // Se mantienen dos interfaces: AP local y STA para conectar al router.
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+  // Baja la potencia de transmision (maximo de fabrica ~19,5 dBm) para reducir el
+  // pico de corriente en cada transmision, que puede hundir el voltaje y reiniciar
+  // el ESP32 (POWERON_RESET) con una fuente USB justa. 15 dBm deja margen de sobra
+  // con la señal medida en pruebas (RSSI -44 a -48 dBm); si el ESP32 queda mas lejos
+  // del router o pierde conexion, subir este valor.
+  WiFi.setTxPower(WIFI_POWER_15dBm);
+  if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+    Serial.printf("RED MAGLEV LOCAL: %s | IP: %s\n",
+                  AP_SSID, WiFi.softAPIP().toString().c_str());
+  } else {
+    Serial.println("AVISO: no se pudo iniciar el punto de acceso local.");
+  }
+  iniciarServidorLocal();
+
+  if (strlen(WIFI_SSID) > 0) {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
+    Serial.printf("Conectando al router: %s\n", WIFI_SSID);
+  }
+  if (!cloudConfigurada) {
+    Serial.println("MODO LOCAL: completa API_URL, DEVICE_ID, DEVICE_TOKEN, ROOT_CA y WiFi para enviar a MAGLEV.");
+  } else {
+    Serial.println("Modo remoto listo para enviar datos a MAGLEV por HTTPS verificado.");
+  }
   const unsigned long ahora = millis();
   ultimoEnvio = ahora; ultimoWifi = ahora; ultimaMuestraSolar = ahora;
-  Serial.printf("Listo: 3 sensores IR, panel solar y bateria por ADC, cola de %u mensajes "
-                "(%u B por ranura). Tambien acepta lineas JSON por Serial.\n",
-                (unsigned)COLA_RANURAS, (unsigned)COLA_BYTES_POR_RANURA);
+  revisarSensoresIR(ahora);
+  actualizarEstacionVisible(ahora);
+  atenderLcd(ahora);
+  // Nucleo 0: solo el envio HTTPS. Nucleo 1 (loop(), por defecto en el core Arduino
+  // de ESP32) sigue libre para sensores, LCD y servidor local sin que un envio
+  // lento lo bloquee. Pila generosa: ahi vive el handshake TLS, no en loop().
+  xTaskCreatePinnedToCore(tareaRed, "tareaRed", 12288, nullptr, 1, &tareaRedHandle, 0);
+  Serial.printf("ESP32 listo. Sensores GPIO 25/26/27, pantalla retenida %lu ms, cola de %u.\n",
+                RETENCION_ESTACION_MS, (unsigned)COLA_RANURAS);
 }
 
 void loop() {
   unsigned long ahora = millis();
-  // Los sensores primero: es lo unico que no se puede recuperar si se pierde.
+  // Priorizar los sensores incluso cuando no hay WiFi. El envio HTTPS vive en
+  // tareaRed (nucleo 0): loop() nunca espera por la red.
   revisarSensoresIR(ahora);
+  actualizarEstacionVisible(ahora);
   atenderLcd(ahora);
+  localServer.handleClient();
 
-  if (WiFi.status() != WL_CONNECTED && (unsigned long)(ahora - ultimoWifi) >= WIFI_REINTENTO_MS) {
-    ultimoWifi = ahora; WiFi.reconnect();
+  if (strlen(WIFI_SSID) > 0 && WiFi.status() != WL_CONNECTED &&
+      (unsigned long)(ahora - ultimoWifi) >= WIFI_REINTENTO_MS) {
+    ultimoWifi = ahora;
+    WiFi.reconnect();
   }
 
   leerSerial();
-
   if ((unsigned long)(ahora - ultimaMuestraSolar) >= SOLAR_INTERVALO_MS) {
     ultimaMuestraSolar = ahora;
     sampleSolarStation();
     ahora = millis();
-    revisarSensoresIR(ahora); // el muestreo ADC tarda unos ms: atender los flancos ya
+    revisarSensoresIR(ahora);
+    actualizarEstacionVisible(ahora);
+    atenderLcd(ahora);
   }
-
-  if (colaUsadas == 0 || WiFi.status() != WL_CONNECTED) { delay(1); return; }
-  if ((unsigned long)(ahora - ultimoEnvio) < reintentoMs) { delay(1); return; }
-  // TLS requiere hora valida para comprobar la vigencia del certificado.
-  if (time(nullptr) < HORA_MINIMA_VALIDA) { delay(1); return; }
-  enviarFrenteDeCola();
+  delay(1);
 }

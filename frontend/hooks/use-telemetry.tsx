@@ -2,9 +2,9 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { getSupabase } from '@/lib/supabase';
 import { errorMessage, fresh, STALE_SECONDS } from '@/lib/format';
-import { linkState } from '@/lib/train-state';
+import { linkState, lastDetection, DETECTION_HOLD_MS } from '@/lib/train-state';
 import type { Device, Measurement, TrainStatus, SolarStation, Station } from '@/lib/database.types';
-type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; stations: Station[]; measurements: Measurement[]; train: TrainStatus[]; solar: SolarStation[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
+type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; stations: Station[]; measurements: Measurement[]; train: TrainStatus[]; heldStation: number | null; solar: SolarStation[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
 const Context = createContext<Feed | null>(null);
 let channelSequence = 0;
 export function TelemetryProvider({ children }: { children: ReactNode }) {
@@ -15,6 +15,28 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [realtime, setRealtime] = useState('CONNECTING');
   const [online, setOnline] = useState(true); const [now, setNow] = useState(Date.now()); const [lastSync, setLastSync] = useState<string | null>(null);
   const version = useRef(0);
+  // Retención visual de una llegada recién recibida (ver DETECTION_HOLD_MS). Se cuenta desde que el
+  // navegador VE el evento nuevo, no desde su created_at: así la duración no depende de que el reloj
+  // del equipo coincida con el del servidor. `undefined` = todavía no hubo primera carga del dispositivo.
+  const [heldStation, setHeldStation] = useState<number | null>(null);
+  const lastArrival = useRef<TrainStatus['id'] | null | undefined>(undefined);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    if (loading) { lastArrival.current = undefined; clearTimeout(holdTimer.current); setHeldStation(null); return; }
+    const latest = lastDetection(train); const id = latest?.id ?? null;
+    // Primera carga: lo que ya estaba almacenado no es un paso recién ocurrido.
+    if (lastArrival.current === undefined) { lastArrival.current = id; return; }
+    if (id === lastArrival.current) return;
+    lastArrival.current = id;
+    // Solo se retiene un evento reciente: tras un error de carga o al despertar el equipo, la última
+    // llegada almacenada puede ser antigua y no debe presentarse como un paso recién ocurrido.
+    // La tolerancia es amplia (STALE_SECONDS, en ambos sentidos) para admitir un reloj local desajustado.
+    if (latest?.station_number == null || Math.abs(Date.now() - Date.parse(latest.created_at)) >= STALE_SECONDS * 1000) return;
+    clearTimeout(holdTimer.current);
+    setHeldStation(latest.station_number);
+    holdTimer.current = setTimeout(() => setHeldStation(null), DETECTION_HOLD_MS);
+  }, [train, loading]);
+  useEffect(() => () => clearTimeout(holdTimer.current), []);
   const refresh = useCallback(async () => {
     const current = ++version.current; const client = getSupabase();
     try {
@@ -75,7 +97,7 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     const interval = setInterval(() => setNow(Date.now()), 5000);
     return () => { clearInterval(interval); window.removeEventListener('online', update); window.removeEventListener('offline', update); };
   }, []);
-  return <Context.Provider value={{ devices, deviceId, selectDevice, stations, measurements, train, solar, loading, error, realtime, online, now, lastSync, refresh }}>{children}</Context.Provider>;
+  return <Context.Provider value={{ devices, deviceId, selectDevice, stations, measurements, train, heldStation, solar, loading, error, realtime, online, now, lastSync, refresh }}>{children}</Context.Provider>;
 }
 export function useTelemetry() { const context = useContext(Context); if (!context) throw new Error('Falta TelemetryProvider'); return context; }
 export function useLiveState() {

@@ -17,15 +17,26 @@ detecta con tres sensores infrarrojos, uno por estación.
    No se envían `panel_current` ni `power_output`: **no hay sensor de corriente**.
 3. **Cola FIFO de mensajes** en RAM, para no perder detecciones cuando llegan varias
    seguidas o la red se cae.
-4. **Pantalla LCD 1602 por I2C.** Muestra `TREN DETECTADO` / `ESTACION 2` al entrar y
-   `TREN SALIO` / `ESTACION 2` al salir, y entre eventos alterna estado de WiFi, tamaño
-   de la cola y voltajes. **Funciona sin internet**: la pantalla se actualiza desde la
-   detección local, antes de intentar cualquier envío.
-5. **Entrega HTTPS** a `POST /api/ingest` con verificación TLS real (`setCACert`, nunca
+4. **Pantalla LCD 1602 por I2C.** Muestra `ESTACION 2` mientras el sensor de esa
+   estación está activo, y la retiene **5 segundos tras la salida** (`RETENCION_ESTACION_MS`)
+   antes de volver a `SIN OBSTACULOS`; si otro sensor se activa antes de que expire, lo
+   reemplaza de inmediato. Si dos sensores están activos a la vez, se muestra el de
+   **menor número de estación** (prioridad 1 > 2 > 3) — esa prioridad es solo para lo que
+   se ve en LCD/web local, **no** afecta qué eventos se envían a Supabase: cada sensor
+   sigue reportando sus propias llegadas y salidas de forma independiente.
+5. **Web local por WiFi propio del ESP32** (`AP_SSID`/`AP_PASSWORD`, por defecto
+   `MAGLEV-MONITOR` / `Maglev2026`), en `http://192.168.4.1`. Muestra paneles, batería,
+   estado de las tres estaciones y el JSON crudo en `/datos`. **Funciona sin WiFi del
+   router ni credenciales de Supabase**: es el modo de prueba de banco sin conexión a
+   internet.
+6. **Entrega HTTPS** a `POST /api/ingest` con verificación TLS real (`setCACert`, nunca
    `setInsecure()`), hora por NTP para comprobar la vigencia del certificado,
    `Authorization: Bearer DEVICE_TOKEN`, `X-Device-Id` y un `sample_id` UUID v4 por
-   mensaje.
-6. **Entrada JSON por Serial**, una línea por mensaje, para bloques que el ESP32 no mide
+   mensaje. Se activa sola (`cloudConfigurada`) solo cuando `WIFI_SSID`, `DEVICE_ID`,
+   `DEVICE_TOKEN`, `ROOT_CA` y un `API_URL` con `https://` están completos en `config.h`;
+   si falta algo, el ESP32 arranca igual en modo local y lo dice por Serial, en vez de
+   quedarse colgado en el arranque.
+7. **Entrada JSON por Serial**, una línea por mensaje, para bloques que el ESP32 no mide
    (p. ej. `measurements`). El firmware no simula ni rellena nada: solo transporta lo
    que lee de sus pines o recibe por Serial.
 
@@ -47,7 +58,10 @@ detecta con tres sensores infrarrojos, uno por estación.
    subas `config.h` al repositorio.** Ahí no van claves de Supabase: el ESP32 solo
    conoce su `DEVICE_ID` y su `DEVICE_TOKEN`.
 5. Si tenías un `config.h` de una versión anterior, vuelve a copiarlo del ejemplo: le
-   faltan las constantes nuevas y la compilación se detiene con un `#error` que lo dice.
+   faltan las constantes nuevas y la compilación se detiene con un `#error` que lo dice
+   — **excepto** `AP_SSID`/`AP_PASSWORD` (red local nueva): si solo faltan esas dos, el
+   error del compilador es menos claro (`'AP_SSID' was not declared`); si lo ves,
+   añádelas a mano desde `config.h.example`.
 
 ## Decisiones de diseño
 
@@ -57,6 +71,14 @@ detecta con tres sensores infrarrojos, uno por estación.
   presencia o una ausencia más corta que ese tiempo no se notifica, así que ese valor
   es el límite inferior del paso del tren por el sensor. Hay que ajustarlo con el tren
   en marcha.
+- El antirrebote es **asimétrico**: la llegada se confirma tras `IR_ANTIRREBOTE_MS`, pero
+  la salida exige `IR_SALIDA_ESTABLE_MS` (250 ms) sin presencia. Motivo, medido con el
+  tren dando vueltas: la estación 2 veía cada paso como **dos pulsos** (72 ms, hueco de
+  ~80 ms, 190 ms) en todas las vueltas, es decir, dos llegadas y dos salidas por un
+  único paso real. Con el filtro, un hueco más corto que ese tiempo no parte el paso en
+  dos. **Contrapartidas:** la salida se notifica 250 ms tarde (el instante que se
+  registra sigue siendo el real) y dos pasos separados por menos de 250 ms se verían
+  como uno, algo imposible con una vuelta de ~13 s.
 - El **nivel activo** es configurable por estación (`IR_ACTIVO_EN_BAJO`): muchos
   módulos IR entregan `LOW` al detectar, pero no todos, y no se asume ninguno.
 - **Dos sensores activos a la vez** funcionan: cada estación tiene su propio estado y
@@ -77,43 +99,83 @@ detecta con tres sensores infrarrojos, uno por estación.
 - FIFO de `COLA_RANURAS` (16) ranuras de `COLA_BYTES_POR_RANURA` (384 B) en RAM
   **estática**, sin `malloc`, para no fragmentar el heap que necesita el handshake TLS.
   Son unos **6,2 KiB**: el ESP32 tiene 320 KiB de DRAM y deja ~150-200 KiB de heap con
-  WiFi y TLS activos. A 1 mensaje/s cubre ~16 s de atasco de red.
+  WiFi y TLS activos. A 1 mensaje/400 ms cubre ~6,4 s de atasco de red.
 - El `sample_id` se fija al encolar y viaja dentro de la ranura, así que **todos los
   reintentos reenvían el mismo**: si la respuesta se pierde pero el servidor ya la
   guardó, el reintento recibe un 200 (duplicada) y no se duplica el registro.
-- Respeta el **límite de 1 mensaje nuevo por segundo** de la API: `INTERVALO_MIN_ENVIO_MS`
-  (1200 ms) contados **desde que termina** el POST, que es más conservador que la
-  ventana del servidor. Un 429 se reintenta con espera fija; un 5xx o un error de red,
+- Respeta el **límite de mensajes nuevos** de la API (`supabase/functions.sql`, 400 ms
+  por dispositivo): `INTERVALO_MIN_ENVIO_MS` (500 ms) contados **desde que termina** el
+  POST, que es más conservador que la ventana del servidor. Antes el límite era de 1 s,
+  pero con el tren dando vueltas sin parar (3 estaciones + ocasional doble disparo en
+  una de ellas + muestras solares) no daba abasto y la cola se llenaba descartando
+  eventos reales — se subió el ritmo en el servidor y en el firmware a la vez.
+  Un 429 se reintenta con espera fija; un 5xx o un error de red,
   con backoff exponencial hasta 60 s; un 4xx definitivo (400, 401, 403, 413, 415)
   descarta el mensaje **informándolo por Serial**.
-- Las muestras solares se limitan a `COLA_MAX_SOLAR_EN_ESPERA` (3) en espera: son
-  periódicas y la siguiente sustituye a la anterior, así que un corte de red no debe
-  llenar la cola y dejar sin sitio a los eventos de tren, que son irrepetibles.
+- Las muestras solares **no compiten** con los eventos de tren: si al tomar una hay
+  mensajes esperando, no se encola; queda como "pendiente" y viaja dentro del siguiente
+  evento de tren (la API admite `train_status` y `solar_station` en el mismo mensaje).
+  Si antes llega otra muestra, la sustituye. Con la cola vacía se envía sola, como
+  siempre. Así un corte de red o una ráfaga de detecciones no llena la cola de muestras
+  periódicas ni retrasa los eventos de tren, que son irrepetibles.
 - Si la cola se llena de eventos de tren, se descarta **el más antiguo** para no perder
   la detección nueva, y se imprime por Serial el mensaje descartado y el total
   acumulado. **Nunca se descarta nada en silencio.** Riesgo conocido: puede desaparecer
   una llegada y sobrevivir su salida.
 
-### El POST sí bloquea: lo que se hace y lo que no
-`HTTPClient` es bloqueante, así que durante un envío (hasta ~10 s de handshake + 8 s de
-respuesta en el peor caso) `loop()` **no corre**. Esto no se puede eliminar sin mover el
-envío a otra tarea de FreeRTOS. Lo que sí se hace:
+### El POST ya no bloquea: envío en su propia tarea de FreeRTOS
+`HTTPClient` es bloqueante (hasta ~10 s de handshake TLS + 8 s de respuesta en el peor
+caso), pero ya no corre dentro de `loop()`. El ESP32 tiene 2 núcleos y el core Arduino
+los reparte así:
 
-- Una **interrupción por flanco** (`CHANGE`) en cada pin IR guarda nivel, instante
-  (`millis()`) y número de flancos. Al volver del POST, el firmware usa el **instante
-  real del flanco** en lugar del momento en que pudo mirar, así que una llegada ocurrida
-  durante el bloqueo se registra con su hora correcta y no se pierde.
-- Se acotan los tiempos (`TLS_HANDSHAKE_S`, `HTTP_TIMEOUT_MS`), no se intenta enviar sin
-  WiFi ni sin hora válida, se lee Serial con un presupuesto de bytes por vuelta, y se
-  revisan los sensores justo al volver del POST y justo después del muestreo ADC.
-- **Limitación que queda:** la interrupción guarda solo el último flanco. Si el tren
-  llega **y** sale completamente dentro del bloqueo, ese paso no se puede reconstruir;
+- **Núcleo 1**: `loop()` — sensores IR, LCD, servidor web local y lectura de Serial.
+  Corre sin interrupciones, le toque o no esperar a la red.
+- **Núcleo 0**: `tareaRed`, una tarea de FreeRTOS dedicada solo a `enviarFrenteDeCola()`.
+  Revisa la cola y envía cuando toca; si un intento tarda o falla, solo bloquea esa
+  tarea, nunca la lectura de sensores.
+
+La cola (`cola[]`, `colaInicio`, `colaUsadas`) la tocan los dos núcleos — `loop()` al
+encolar, `tareaRed` al desencolar — así que está protegida con un mutex (`colaMutex`,
+`xSemaphoreTake`/`xSemaphoreGive`) en cada acceso. `enviarFrenteDeCola()` copia el
+mensaje del frente bajo el mutex y lo suelta antes del handshake TLS: la cola nunca
+queda bloqueada durante el envío en sí.
+
+Esto no elimina dos limitaciones que siguen igual:
+- La interrupción por flanco (`CHANGE`) en cada pin IR solo guarda el último flanco; si
+  el tren llega **y** sale completamente entre dos vueltas de `revisarSensoresIR()` (algo
+  ahora mucho más raro, al no haber bloqueo de red), ese paso no se puede reconstruir —
   el firmware lo detecta (dos o más flancos sin cambio neto de estado) y lo avisa por
   Serial en vez de callarlo.
-- **Limitación que queda:** no se envía `sampled_at`. Los eventos que salen de la cola
-  después de un corte quedan sellados por el servidor con la hora de **recepción**, no
-  con la de la detección, así que en el panel aparecerán agrupados en el momento de la
-  reconexión.
+- No se envía `sampled_at`. Los eventos que salen de la cola después de un corte quedan
+  sellados por el servidor con la hora de **recepción**, no con la de la detección, así
+  que en el panel aparecerán agrupados en el momento de la reconexión.
+
+### Conexión HTTPS persistente (keep-alive)
+Antes cada mensaje abría una conexión TLS nueva, y el handshake (~1 s en el ESP32)
+dominaba el envío: medido con el tren en marcha, **~1,6 s por mensaje** (8 envíos por
+vuelta de ~13 s) frente a ~10 mensajes generados por vuelta. La cola crecía sin parar,
+la web iba hasta ~25 s por detrás de la LCD y al llenarse se descartaban eventos reales.
+
+Ahora `tlsCliente` y `httpCliente` son globales y la conexión se reutiliza: el handshake
+se paga una vez y cada mensaje cuesta solo la ida y vuelta de la petición. Detalles:
+- Los dos objetos viven fuera de la función de envío porque el destructor de
+  `HTTPClient` cierra el socket.
+- El certificado se sigue verificando en cada handshake (`setCACert`, nunca
+  `setInsecure()`).
+- Si la conexión reutilizada se había cerrado en reposo, el envío se reintenta **una**
+  vez con conexión nueva y lo avisa por Serial. Es seguro por el `sample_id`: si el
+  primer intento sí llegó, la API responde 200 (duplicada).
+- Ante cualquier error de red se cierra el socket, para empezar limpio.
+- **PENDIENTE DE MEDIR** con el tren en marcha: el tiempo real por mensaje con la
+  conexión reutilizada y cuánto tarda el servidor en cerrar una conexión en reposo.
+
+### Potencia de transmisión WiFi reducida
+`WiFi.setTxPower(WIFI_POWER_15dBm)` baja la potencia desde el máximo de fábrica
+(~19,5 dBm) para reducir el pico de corriente de cada transmisión — con una fuente USB
+justa, ese pico puede hundir el voltaje lo suficiente para reiniciar el ESP32
+(`rst:0x1 (POWERON_RESET)`, confirmado en pruebas de campo). 15 dBm deja margen de sobra
+con el RSSI medido (-44 a -48 dBm); si el ESP32 queda más lejos del router o pierde
+conexión, hay que subir este valor en `MaglevSender.ino`.
 
 ### LCD
 - Dirección I2C, pines SDA/SCL y tiempos son configurables. Lo habitual es **0x27 o
@@ -153,7 +215,7 @@ esto.** Nada de lo siguiente está comprobado sobre el prototipo:
   12 KiB (`SET_LOOP_TASK_STACK_SIZE`) porque mbedTLS gasta varios KiB; si aun así
   aparecen reinicios por desbordamiento de pila, subir ese valor.
 - **Comportamiento real ante reconexión WiFi, reinicio y corte de alimentación**, y el
-  ritmo efectivo frente al límite de 1 mensaje/s de la API.
+  ritmo efectivo frente al límite de 400 ms/mensaje de la API.
 
 ### Qué sí se verificó (sin hardware)
 
