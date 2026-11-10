@@ -150,6 +150,29 @@ Esto no elimina dos limitaciones que siguen igual:
   sellados por el servidor con la hora de **recepción**, no con la de la detección, así
   que en el panel aparecerán agrupados en el momento de la reconexión.
 
+### Rapidez media y tiempo de vuelta: los intervalos viajan en el evento
+Cada **llegada** incluye, medidos con el reloj monotónico del ESP32 (`millis()`):
+- `lap_ms`: ms desde la llegada anterior a **esa misma** estación — el tiempo de vuelta.
+- `prev_station_number` + `ms_from_prev`: desde qué estación venía el tren y cuántos ms
+  tardó el tramo.
+
+Se miden aquí y nunca en el servidor: las horas de recepción arrastran el retraso
+variable de la red (décimas de segundo) y arruinarían el cálculo. La primera pasada
+tras un arranque va sin intervalos (no hay llegada anterior con la que comparar), y un
+intervalo mayor de 10 minutos no se envía: no es una vuelta, es el tren detenido un
+rato. La web convierte tiempo en **rapidez media** solo en los tramos cuya distancia se
+midió con cinta métrica (Configuración → Estaciones de la vía → Distancia): sin
+distancia muestra únicamente tiempos, nunca una rapidez inventada.
+
+### Salud del dispositivo
+Cada `SALUD_INTERVALO_MS` (30 s) el firmware envía un bloque `device_health` con lo que
+el propio ESP32 mide de sí mismo: motivo del último arranque (`esp_reset_reason()`,
+que distingue un **brownout** de la fuente de un reinicio por software), tiempo
+encendido, RSSI del WiFi, heap libre y mensajes descartados por la cola desde el
+arranque. El latido se salta si hay mensajes esperando — la salud cambia despacio y
+nunca compite con un evento de tren — y solo se emite con WiFi conectado, la única
+situación con un RSSI real. La web lo muestra en «Tiempo real → Salud del dispositivo».
+
 ### Conexión HTTPS persistente (keep-alive)
 Antes cada mensaje abría una conexión TLS nueva, y el handshake (~1 s en el ESP32)
 dominaba el envío: medido con el tren en marcha, **~1,6 s por mensaje** (8 envíos por

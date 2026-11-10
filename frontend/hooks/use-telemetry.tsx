@@ -3,15 +3,15 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { getSupabase } from '@/lib/supabase';
 import { errorMessage, fresh, STALE_SECONDS } from '@/lib/format';
 import { linkState, lastDetection, DETECTION_HOLD_MS } from '@/lib/train-state';
-import type { Device, Measurement, TrainStatus, SolarStation, Station } from '@/lib/database.types';
-type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; stations: Station[]; measurements: Measurement[]; train: TrainStatus[]; heldStation: number | null; solar: SolarStation[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
+import type { Device, DeviceHealth, Measurement, TrainStatus, SolarStation, Station } from '@/lib/database.types';
+type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; stations: Station[]; measurements: Measurement[]; train: TrainStatus[]; heldStation: number | null; solar: SolarStation[]; health: DeviceHealth[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
 const Context = createContext<Feed | null>(null);
 let channelSequence = 0;
 export function TelemetryProvider({ children }: { children: ReactNode }) {
   const [devices, setDevices] = useState<Device[]>([]); const [deviceId, selectDevice] = useState('');
   // Los nombres de las estaciones son globales (tabla `stations`), no dependen del dispositivo seleccionado.
   const [stations, setStations] = useState<Station[]>([]);
-  const [measurements, setMeasurements] = useState<Measurement[]>([]); const [train, setTrain] = useState<TrainStatus[]>([]); const [solar, setSolar] = useState<SolarStation[]>([]);
+  const [measurements, setMeasurements] = useState<Measurement[]>([]); const [train, setTrain] = useState<TrainStatus[]>([]); const [solar, setSolar] = useState<SolarStation[]>([]); const [health, setHealth] = useState<DeviceHealth[]>([]);
   const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [realtime, setRealtime] = useState('CONNECTING');
   const [online, setOnline] = useState(true); const [now, setNow] = useState(Date.now()); const [lastSync, setLastSync] = useState<string | null>(null);
   const version = useRef(0);
@@ -51,20 +51,22 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
       setDevices(d.data); setStations(st.data);
       const selected = d.data.some(x => x.id === deviceId) ? deviceId : (d.data.find(x => x.enabled)?.id ?? d.data[0]?.id ?? '');
       if (selected !== deviceId) { selectDevice(selected); return; }
-      if (!selected) { setMeasurements([]); setTrain([]); setSolar([]); setError(''); setLastSync(new Date().toISOString()); return; }
-      const [m, t, s] = await Promise.all([
+      if (!selected) { setMeasurements([]); setTrain([]); setSolar([]); setHealth([]); setError(''); setLastSync(new Date().toISOString()); return; }
+      const [m, t, s, h] = await Promise.all([
         client.from('measurements').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240),
         client.from('train_status').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240),
-        client.from('solar_station').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240)
+        client.from('solar_station').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240),
+        // Una muestra de salud cada ~30 s: 240 filas cubren unas 2 horas de funcionamiento.
+        client.from('device_health').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240)
       ]);
-      if (m.error || t.error || s.error) throw m.error || t.error || s.error;
+      if (m.error || t.error || s.error || h.error) throw m.error || t.error || s.error || h.error;
       if (current !== version.current) return;
-      setMeasurements(m.data); setTrain(t.data); setSolar(s.data); setError(''); setLastSync(new Date().toISOString());
+      setMeasurements(m.data); setTrain(t.data); setSolar(s.data); setHealth(h.data); setError(''); setLastSync(new Date().toISOString());
     } catch (e) { if (current === version.current) setError(errorMessage(e)); }
     finally { if (current === version.current) setLoading(false); }
   }, [deviceId]);
   useEffect(() => {
-    setLoading(true); setMeasurements([]); setTrain([]); setSolar([]); setLastSync(null); setError(''); setRealtime('CONNECTING');
+    setLoading(true); setMeasurements([]); setTrain([]); setSolar([]); setHealth([]); setLastSync(null); setError(''); setRealtime('CONNECTING');
     // `active` evita que eventos o estados tardíos del canal anterior (p. ej. CLOSED al terminar su salida)
     // sobrescriban el estado del canal nuevo o programen consultas con el dispositivo anterior.
     const client = getSupabase(); let timer: ReturnType<typeof setTimeout> | undefined; let active = true;
@@ -84,7 +86,7 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, queueRefresh)
       // `stations` es global: se escucha sin filtro de dispositivo para que un renombrado se refleje al instante.
       .on('postgres_changes', { event: '*', schema: 'public', table: 'stations' }, queueRefresh);
-    if (deviceId) for (const table of ['measurements', 'train_status', 'solar_station']) {
+    if (deviceId) for (const table of ['measurements', 'train_status', 'solar_station', 'device_health']) {
       channel = channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `device_id=eq.${deviceId}` }, queueRefresh);
     }
     channel.subscribe(status => { if (!active) return; setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
@@ -97,7 +99,7 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     const interval = setInterval(() => setNow(Date.now()), 5000);
     return () => { clearInterval(interval); window.removeEventListener('online', update); window.removeEventListener('offline', update); };
   }, []);
-  return <Context.Provider value={{ devices, deviceId, selectDevice, stations, measurements, train, heldStation, solar, loading, error, realtime, online, now, lastSync, refresh }}>{children}</Context.Provider>;
+  return <Context.Provider value={{ devices, deviceId, selectDevice, stations, measurements, train, heldStation, solar, health, loading, error, realtime, online, now, lastSync, refresh }}>{children}</Context.Provider>;
 }
 export function useTelemetry() { const context = useContext(Context); if (!context) throw new Error('Falta TelemetryProvider'); return context; }
 export function useLiveState() {

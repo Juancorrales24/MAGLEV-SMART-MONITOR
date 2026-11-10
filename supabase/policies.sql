@@ -14,7 +14,7 @@ create or replace function private.maglev_admin() returns boolean language sql s
 $$;
 revoke all on function private.maglev_active(), private.maglev_admin() from public,anon;
 grant execute on function private.maglev_active(), private.maglev_admin() to authenticated;
-grant select on public.profiles,public.devices,public.measurements,public.stations,public.train_status,public.solar_station to authenticated;
+grant select on public.profiles,public.devices,public.measurements,public.stations,public.train_status,public.solar_station,public.device_health to authenticated;
 drop policy if exists maglev_profile_read on public.profiles;
 create policy maglev_profile_read on public.profiles for select to authenticated using(id=(select auth.uid()) or (select private.maglev_admin()));
 drop policy if exists maglev_device_read on public.devices;
@@ -28,6 +28,8 @@ drop policy if exists maglev_train_read on public.train_status;
 create policy maglev_train_read on public.train_status for select to authenticated using((select private.maglev_active()));
 drop policy if exists maglev_solar_read on public.solar_station;
 create policy maglev_solar_read on public.solar_station for select to authenticated using((select private.maglev_active()));
+drop policy if exists maglev_health_read on public.device_health;
+create policy maglev_health_read on public.device_health for select to authenticated using((select private.maglev_active()));
 -- Versiones anteriores las creaban en public (expuestas por RPC). Se eliminan después de
 -- recrear las políticas, que eran sus únicas dependencias.
 drop function if exists public.maglev_active();

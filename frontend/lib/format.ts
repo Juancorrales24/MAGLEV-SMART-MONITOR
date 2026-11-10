@@ -32,3 +32,9 @@ export function safeCsvCell(value: unknown) {
   return '"' + safe.replaceAll('"', '""') + '"';
 }
 export function toCsv(headers: string[], rows: unknown[][]) { return '\uFEFF' + [headers, ...rows].map(row => row.map(safeCsvCell).join(';')).join('\r\n'); }
+
+/** Rapidez como texto: m/s con su equivalente en km/h. Null si no hay medición. */
+export function formatSpeed(metersPerSecond: number | null) {
+  if (metersPerSecond == null || !Number.isFinite(metersPerSecond)) return null;
+  return `${metersPerSecond.toFixed(2)} m/s (${(metersPerSecond * 3.6).toFixed(1)} km/h)`;
+}

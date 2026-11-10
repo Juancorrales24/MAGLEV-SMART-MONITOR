@@ -32,10 +32,17 @@
 #error "config.h esta desactualizado: vuelve a copiarlo de config.h.example y rellena tus datos."
 #endif
 
-// Valor por defecto para un config.h anterior a esta constante (ver config.h.example).
+// Valores por defecto para un config.h anterior a estas constantes (ver config.h.example).
 #ifndef IR_SALIDA_ESTABLE_MS
 #define IR_SALIDA_ESTABLE_MS 250UL
 #endif
+// Cada cuanto se envia la muestra de salud del dispositivo (ver "Salud" en esp32/README.md).
+#ifndef SALUD_INTERVALO_MS
+#define SALUD_INTERVALO_MS 30000UL
+#endif
+// Un intervalo entre llegadas mayor que esto no es una vuelta ni un tramo: es el tren
+// detenido un rato. No se envia (la API lo rechazaria igual, por contrato).
+#define INTERVALO_IR_MAX_MS 600000UL
 
 #if LCD_ENABLED
 #include <Wire.h>
@@ -62,7 +69,7 @@ int ultimoHttpCodigo = 0;
 unsigned long ultimoHttpCorrectoMs = 0;
 String inputLine;
 bool descartandoLinea = false;
-unsigned long ultimoWifi = 0, ultimaMuestraSolar = 0;
+unsigned long ultimoWifi = 0, ultimaMuestraSolar = 0, ultimaSalud = 0;
 
 // El envio HTTPS corre en su propia tarea de FreeRTOS, en el nucleo 0, para que un
 // intento lento o fallido (hasta ~18 s entre handshake TLS y espera de respuesta)
@@ -106,7 +113,7 @@ int solarPendNivel = 0;
 // activos, asi que 6 KiB es despreciable; a 1 mensaje/400 ms la cola cubre ~6,4 s de
 // atasco de red, suficiente para una reconexion WiFi tipica. Subirla cuesta RAM
 // lineal: comprobar con ESP.getFreeHeap() antes de pasar de ~64 ranuras.
-enum ClaseMensaje : uint8_t { CLASE_TREN = 0, CLASE_SOLAR = 1, CLASE_SERIAL = 2 };
+enum ClaseMensaje : uint8_t { CLASE_TREN = 0, CLASE_SOLAR = 1, CLASE_SERIAL = 2, CLASE_SALUD = 3 };
 struct Ranura { char json[COLA_BYTES_POR_RANURA]; uint8_t clase; };
 Ranura cola[COLA_RANURAS];
 uint16_t colaInicio = 0, colaUsadas = 0;
@@ -398,13 +405,22 @@ void registrarTransicion(uint8_t i, bool presencia, unsigned long instanteMs) {
   // siguen siendo correctas cuando millis() desborda (cada ~49,7 dias).
   // Esto es solo la MATERIA PRIMA de un calculo futuro de rapidez media: aqui no se
   // calcula ninguna velocidad y nada de esto se envia a la API.
+  // Los intervalos se capturan ANTES de actualizar el estado y viajan dentro del evento:
+  // los mide este reloj monotonico, nunca el servidor con horas de recepcion (la red
+  // mete retrasos variables de decimas de segundo que arruinarian el calculo).
+  unsigned long lapMs = 0, tramoMs = 0; int tramoDesde = 0;
   if (presencia) {
-    if (irHuboLlegada[i])
+    if (irHuboLlegada[i]) {
+      lapMs = (unsigned long)(instanteMs - irUltimaLlegadaMs[i]);
       Serial.printf("IR: estacion %u, %lu ms desde su llegada anterior (registro local).\n",
-                    (unsigned)(i + 1), (unsigned long)(instanteMs - irUltimaLlegadaMs[i]));
-    if (llegadaPreviaEstacion >= 0 && llegadaPreviaEstacion != (int)i)
+                    (unsigned)(i + 1), lapMs);
+    }
+    if (llegadaPreviaEstacion >= 0 && llegadaPreviaEstacion != (int)i) {
+      tramoDesde = llegadaPreviaEstacion + 1;
+      tramoMs = (unsigned long)(instanteMs - llegadaPreviaMs);
       Serial.printf("IR: %lu ms desde la llegada a la estacion %d (registro local).\n",
-                    (unsigned long)(instanteMs - llegadaPreviaMs), llegadaPreviaEstacion + 1);
+                    tramoMs, tramoDesde);
+    }
     irUltimaLlegadaMs[i] = instanteMs; irHuboLlegada[i] = true;
     llegadaPreviaEstacion = (int)i; llegadaPreviaMs = instanteMs;
   }
@@ -419,6 +435,11 @@ void registrarTransicion(uint8_t i, bool presencia, unsigned long instanteMs) {
   JsonObject ts = doc["train_status"].to<JsonObject>();
   ts["station_number"] = (int)(i + 1);
   ts["detected"] = presencia;
+  if (lapMs > 0 && lapMs <= INTERVALO_IR_MAX_MS) ts["lap_ms"] = lapMs;
+  if (tramoDesde > 0 && tramoMs > 0 && tramoMs <= INTERVALO_IR_MAX_MS) {
+    ts["prev_station_number"] = tramoDesde;
+    ts["ms_from_prev"] = tramoMs;
+  }
   if (solarPendiente) {
     // La ultima muestra solar aplazada viaja en este mismo mensaje: un envio menos.
     agregarBloqueSolar(doc, solarPendPanel, solarPendBateria, solarPendNivel);
@@ -588,6 +609,48 @@ void sampleSolarStation() {
   JsonDocument doc;
   agregarBloqueSolar(doc, panel, bateria, porcentaje);
   encolarDocumento(doc, CLASE_SOLAR);
+}
+
+// ---------------------------------------------------------------------------
+// Salud del dispositivo: autodiagnostico periodico medido por el propio ESP32.
+// ---------------------------------------------------------------------------
+const char* motivoReinicio() {
+  // Texto corto y estable: la web lo traduce a su etiqueta (lib/device-health.ts).
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "alimentacion";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SW:       return "software";
+    case ESP_RST_PANIC:    return "panic";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:      return "watchdog";
+    case ESP_RST_DEEPSLEEP:return "deepsleep";
+    case ESP_RST_EXT:      return "externo";
+    default:               return "desconocido";
+  }
+}
+
+// Encola una muestra de salud cada SALUD_INTERVALO_MS. Igual que la solar, no compite
+// con los eventos de tren: si hay mensajes esperando se salta este latido (el siguiente
+// llega en 30 s y la salud cambia despacio). Solo tiene sentido con WiFi conectado,
+// que ademas es la unica situacion en la que WiFi.RSSI() devuelve un valor real.
+void enviarSaludSiToca(unsigned long ahora) {
+  if (!cloudConfigurada || WiFi.status() != WL_CONNECTED) return;
+  if ((unsigned long)(ahora - ultimaSalud) < SALUD_INTERVALO_MS) return;
+  ultimaSalud = ahora;
+  xSemaphoreTake(colaMutex, portMAX_DELAY);
+  const bool colaOcupada = colaUsadas > 0;
+  const unsigned long descartados = colaDescartados;
+  xSemaphoreGive(colaMutex);
+  if (colaOcupada) return;
+  JsonDocument doc;
+  JsonObject h = doc["device_health"].to<JsonObject>();
+  h["reset_reason"] = motivoReinicio();
+  h["uptime_s"] = (unsigned long)(ahora / 1000UL);
+  h["rssi_dbm"] = (int)WiFi.RSSI();
+  h["free_heap_b"] = (unsigned long)ESP.getFreeHeap();
+  h["queue_dropped"] = descartados;
+  encolarDocumento(doc, CLASE_SALUD);
 }
 
 // ---------------------------------------------------------------------------
@@ -941,6 +1004,10 @@ void setup() {
   }
   const unsigned long ahora = millis();
   ultimoEnvio = ahora; ultimoWifi = ahora; ultimaMuestraSolar = ahora;
+  // La primera muestra de salud sale ~5 s tras el arranque (asi el motivo del reinicio
+  // llega pronto a la web); las siguientes, cada SALUD_INTERVALO_MS. La resta modular
+  // de unsigned long hace esta inicializacion correcta aunque "ahora" sea pequeno.
+  ultimaSalud = ahora - (SALUD_INTERVALO_MS - 5000UL);
   revisarSensoresIR(ahora);
   actualizarEstacionVisible(ahora);
   atenderLcd(ahora);
@@ -968,6 +1035,7 @@ void loop() {
   }
 
   leerSerial();
+  enviarSaludSiToca(ahora);
   if ((unsigned long)(ahora - ultimaMuestraSolar) >= SOLAR_INTERVALO_MS) {
     ultimaMuestraSolar = ahora;
     sampleSolarStation();

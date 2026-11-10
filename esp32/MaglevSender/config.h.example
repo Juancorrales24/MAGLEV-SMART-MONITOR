@@ -80,6 +80,11 @@ const bool IR_ACTIVO_EN_BAJO[3] = { true, true, true };
 // tarde y dos pasos separados por menos se verían como uno.
 #define IR_SALIDA_ESTABLE_MS 250UL
 
+// Cada cuánto envía el ESP32 su muestra de salud (motivo del último arranque, tiempo
+// encendido, RSSI, heap libre y mensajes descartados). Se omite el latido si hay
+// mensajes de tren esperando: la salud nunca compite con los eventos.
+#define SALUD_INTERVALO_MS 30000UL
+
 // === Estación solar: panel y batería por ADC ================================
 // Divisor resistivo en cada entrada; ambos pines son solo-entrada del ADC1, que es
 // el único que funciona con el WiFi encendido.

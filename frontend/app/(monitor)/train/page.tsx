@@ -2,16 +2,22 @@
 import { useMemo, useState } from 'react';
 import { MapPin, Radio, History, Antenna } from 'lucide-react';
 import { useTelemetry, useLiveState } from '@/hooks/use-telemetry';
-import { PageTitle, Panel, StatCard, LoadingState, Notice } from '@/components/ui';
+import { PageTitle, Panel, StatCard, LoadingState, Notice, EmptyState } from '@/components/ui';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { StationMap } from '@/components/StationMap';
 import { TrainEvents } from '@/components/TrainEvents';
-import { activeStation, lastDetection, sensorEvents, shownDetection, stationName, stationViews, STATION_POSITIONS, DETECTION_HOLD_MS } from '@/lib/train-state';
-import { dateTime, relativeAge, NO_DATA } from '@/lib/format';
+import { TelemetryChart } from '@/components/TelemetryChart';
+import { activeStation, lapStats, lastDetection, segmentStats, sensorEvents, shownDetection, stationName, stationViews, STATION_POSITIONS, DETECTION_HOLD_MS } from '@/lib/train-state';
+import { dateTime, formatSpeed, number, relativeAge, NO_DATA } from '@/lib/format';
 export default function Train() {
   const f = useTelemetry(); const { device, link } = useLiveState(); const [station, setStation] = useState('');
   const views = useMemo(() => stationViews(f.train, f.stations), [f.train, f.stations]);
   const events = useMemo(() => sensorEvents(f.train), [f.train]);
+  const segments = useMemo(() => segmentStats(f.train, f.stations), [f.train, f.stations]);
+  const laps = useMemo(() => lapStats(f.train), [f.train]);
+  // Serie para la gráfica: cada registro de vuelta, en segundos, con su hora de recepción.
+  const lapSeries = useMemo(() => f.train.filter(r => r.detected === true && r.lap_ms != null).map(r => ({ created_at: r.created_at, lap_s: (r.lap_ms as number) / 1000 })), [f.train]);
+  const anyInterval = segments.some(s => s.count > 0) || laps.count > 0;
   const active = activeStation(views); const shown = shownDetection(views, f.heldStation);
   const last = lastDetection(f.train);
   const lastView = last?.station_number == null ? null : views.find(v => v.position === last.station_number) ?? null;
@@ -40,6 +46,31 @@ export default function Train() {
       <Panel title="Esquema de la vía" subtitle="Estado independiente de cada sensor. Una estación sin evento propio nunca se da por alcanzada.">
         <div className="panel-body"><StationMap views={views} lastOverall={lastView} now={f.now} held={f.heldStation}/></div>
       </Panel>
+      <div className="two-columns">
+        <Panel title="Tiempo de vuelta" subtitle="Medido por el ESP32 con su reloj interno entre dos llegadas consecutivas a una misma estación; cada vuelta aporta hasta tres registros, uno por estación.">
+          <dl className="settings-list">
+            <div><dt>Última vuelta</dt><dd>{laps.lastMs != null ? `${number(laps.lastMs / 1000, 2)} s` : NO_DATA}</dd></div>
+            <div><dt>Promedio de la ventana cargada</dt><dd>{laps.meanMs != null ? `${number(laps.meanMs / 1000, 2)} s` : NO_DATA}</dd></div>
+            <div><dt>Vuelta más rápida de la ventana</dt><dd>{laps.bestMs != null ? `${number(laps.bestMs / 1000, 2)} s` : NO_DATA}</dd></div>
+            <div><dt>Registros de vuelta cargados</dt><dd>{laps.count}</dd></div>
+          </dl>
+          <TelemetryChart data={lapSeries} field="lap_s" label="Tiempo de vuelta" unit="s" color="#5B8FD4"/>
+        </Panel>
+        <Panel title="Rapidez media por tramo" subtitle="Tiempo medido por el ESP32; la rapidez solo aparece en los tramos con distancia medida (Configuración → Estaciones de la vía).">
+          {!anyInterval ? <EmptyState compact title="Sin intervalos medidos todavía" description="Cada llegada enviada por el firmware actualizado trae el tiempo desde la estación anterior. Deja el tren dando vueltas para ver tiempos y, con las distancias medidas, la rapidez media."/> :
+          <div className="table-scroll"><table>
+            <caption className="sr-only">Tiempos y rapidez media por tramo del circuito</caption>
+            <thead><tr><th scope="col">Tramo</th><th scope="col">Distancia</th><th scope="col">Último tiempo</th><th scope="col">Rapidez última</th><th scope="col">Rapidez promedio</th></tr></thead>
+            <tbody>{segments.map(s => <tr key={s.from}>
+              <td>{stationName(f.stations, s.from)} → {stationName(f.stations, s.to)}</td>
+              <td className="mono">{s.distanceM != null ? `${number(s.distanceM, 2)} m` : 'Sin medir'}</td>
+              <td className="mono">{s.lastMs != null ? `${number(s.lastMs / 1000, 2)} s` : NO_DATA}</td>
+              <td className="mono">{formatSpeed(s.lastSpeedMs) ?? NO_DATA}</td>
+              <td className="mono">{formatSpeed(s.meanSpeedMs) ?? NO_DATA}</td>
+            </tr>)}</tbody>
+          </table></div>}
+        </Panel>
+      </div>
       <Panel title="Historial de detecciones" subtitle="Llegadas y salidas tal como las reportaron los sensores."
         action={<label className="inline-field">Estación
           <select value={station} onChange={e => setStation(e.target.value)}>

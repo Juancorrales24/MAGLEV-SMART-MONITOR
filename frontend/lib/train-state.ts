@@ -114,6 +114,50 @@ export function linkState(input: {
   return { key: 'receiving', label: 'Comunicación reciente', detail: `Telemetría recibida dentro de los últimos ${staleSeconds} s.`, ok: true };
 }
 
+/** Estación siguiente del circuito físico 1→2→3→1. */
+export function nextStation(position: number) { return position === 3 ? 1 : position + 1; }
+
+export type SegmentStat = {
+  from: number; to: number; count: number;
+  lastMs: number | null; meanMs: number | null;
+  /** Distancia del tramo (Configuración); null = sin medir y entonces no se calcula rapidez. */
+  distanceM: number | null;
+  lastSpeedMs: number | null; meanSpeedMs: number | null;
+};
+
+/**
+ * Tiempos y rapidez media por tramo del circuito (1→2, 2→3, 3→1), SOLO con intervalos medidos
+ * por el ESP32 (ms_from_prev) y distancias medidas a mano (stations.gap_to_next_m). Una llegada
+ * cuyo tramo no es el del circuito (p. ej. tras mover el tren a mano) queda fuera de la tabla.
+ */
+export function segmentStats(train: TrainStatus[], stations: Station[]): SegmentStat[] {
+  const arrivals = sensorEvents(train).filter(e => e.detected === true && e.ms_from_prev != null && e.prev_station_number != null);
+  return STATION_POSITIONS.map(from => {
+    const to = nextStation(from);
+    // sensorEvents ordena de más reciente a más antiguo: el primero es el último medido.
+    const own = arrivals.filter(e => e.prev_station_number === from && e.station_number === to);
+    const times = own.map(e => e.ms_from_prev as number);
+    const distanceM = stations.find(s => s.position === from)?.gap_to_next_m ?? null;
+    const lastMs = times[0] ?? null;
+    const meanMs = times.length ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : null;
+    const speed = (ms: number | null) => distanceM != null && ms != null ? distanceM / (ms / 1000) : null;
+    return { from, to, count: times.length, lastMs, meanMs, distanceM, lastSpeedMs: speed(lastMs), meanSpeedMs: speed(meanMs) };
+  });
+}
+
+export type LapStat = { count: number; lastMs: number | null; meanMs: number | null; bestMs: number | null };
+
+/**
+ * Tiempo de vuelta a partir de lap_ms (ms entre dos llegadas consecutivas a la MISMA estación,
+ * medidos por el ESP32). Cada vuelta física aporta hasta tres registros, uno por estación:
+ * `count` cuenta registros, no vueltas.
+ */
+export function lapStats(train: TrainStatus[]): LapStat {
+  const laps = sensorEvents(train).filter(e => e.detected === true && e.lap_ms != null).map(e => e.lap_ms as number);
+  if (!laps.length) return { count: 0, lastMs: null, meanMs: null, bestMs: null };
+  return { count: laps.length, lastMs: laps[0], meanMs: Math.round(laps.reduce((a, b) => a + b, 0) / laps.length), bestMs: Math.min(...laps) };
+}
+
 /** Serie temporal de un campo numérico: descarta nulos para no dibujar ceros inventados. */
 export function hasReadings<T extends Record<string, unknown>>(rows: T[], field: keyof T & string) {
   return rows.some(r => typeof r[field] === 'number' && Number.isFinite(r[field] as number));
