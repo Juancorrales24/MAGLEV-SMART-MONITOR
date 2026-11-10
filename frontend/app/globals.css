@@ -115,7 +115,9 @@ form{display:flex;flex-direction:column;gap:18px}
 .connection-when{font-size:.73rem!important;color:#B6C0CD!important}
 .connection-banner>.status-pill{margin-top:2px}
 /* Tarjetas de indicadores */
-.metrics-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+/* La rejilla reserva su propio espacio inferior, igual que .panel: sin esto, un panel
+   colocado justo despues queda pegado a las tarjetas (no hay margen entre ambos). */
+.metrics-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:22px}
 .metrics-grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
 .metrics-grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
 .metric{position:relative;overflow:hidden;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;min-height:150px}
@@ -321,7 +323,7 @@ td .badge{font-size:.65rem}
  .text-link{font-size:.7rem}
  .chart{height:240px;padding-right:4px}.chart-note{padding:0 16px 16px}
  .empty-state{min-height:210px}.empty-state.compact{min-height:180px}
- .panel{margin-bottom:16px}
+ .panel,.metrics-grid{margin-bottom:16px}
  /* En móvil la vía se apila: el riel pasa a ser un tramo vertical entre tarjetas. */
  .station-track{grid-template-columns:1fr;gap:14px}
  .station-node{padding:0}
