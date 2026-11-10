@@ -472,8 +472,13 @@ void sampleSolarStation() {
   }
   const int porcentaje = porcentajeBateria(bateria);
   ultimoPanel = panel; ultimaBateria = bateria; ultimoPorcentaje = porcentaje; solarValido = true;
-  Serial.printf("SOLAR: panel %.2f V, bateria %.2f V, nivel estimado %d %%.\n",
-                panel, bateria, porcentaje);
+  // Heap libre y mayor bloque contiguo en cada muestra (ritmo fijo, independiente
+  // del exito/fallo del envio): sirve para ver si la memoria se va fragmentando con
+  // el tiempo, lo que haria fallar el handshake TLS aunque el certificado este bien.
+  Serial.printf("SOLAR: panel %.2f V, bateria %.2f V, nivel estimado %d %%. "
+                "Heap libre %u B, mayor bloque %u B.\n",
+                panel, bateria, porcentaje,
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   JsonDocument doc;
   JsonObject s = doc["solar_station"].to<JsonObject>();
   s["panel_voltage"] = panel;
@@ -665,9 +670,10 @@ void enviarFrenteDeCola() {
   // la ventana del servidor, que la mide entre mensajes aceptados.
   ultimoEnvio = millis();
   if (code == 201 || code == 200) {
-    Serial.printf("OK %d: %s (quedan %u en cola).\n",
+    Serial.printf("OK %d: %s (quedan %u en cola). Heap libre %u B, mayor bloque %u B.\n",
                   code, code == 200 ? "duplicada, ya estaba registrada" : "registrada",
-                  (unsigned)(colaUsadas - 1));
+                  (unsigned)(colaUsadas - 1),
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     colaQuitarFrente(); reintentoMs = INTERVALO_MIN_ENVIO_MS;
   } else if (code == 429) {
     // Limite de ritmo: el mensaje sigue siendo valido. Se conserva su sample_id y se
@@ -689,12 +695,13 @@ void enviarFrenteDeCola() {
     char tlsErr[128] = "";
     tls.lastError(tlsErr, sizeof(tlsErr));
     Serial.printf("REINTENTO HTTP %d (%s)%s%s: se conserva el sample_id (%u en cola). "
-                  "IP local %s, gateway %s, DNS %s, RSSI %d dBm.\n",
+                  "IP local %s, gateway %s, DNS %s, RSSI %d dBm. Heap libre %u B, mayor bloque %u B.\n",
                   code, http.errorToString(code).c_str(),
                   tlsErr[0] ? " | TLS: " : "", tlsErr,
                   (unsigned)colaUsadas,
                   WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
-                  WiFi.dnsIP(0).toString().c_str(), (int)WiFi.RSSI());
+                  WiFi.dnsIP(0).toString().c_str(), (int)WiFi.RSSI(),
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     aplicarBackoff();
   }
   // Durante el POST loop() estuvo bloqueado. La ISR guardo el instante de los
