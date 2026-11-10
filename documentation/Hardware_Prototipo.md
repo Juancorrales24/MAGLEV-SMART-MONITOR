@@ -1,3 +1,5 @@
+> **ACLARACIÓN DE VERSIÓN:** El firmware actualizado sí integra GPIO 25/26/27, LCD I²C y monitor local. La descripción de funcionalidades pendientes de algunas secciones de este documento es histórica. Consulta [la guía actual](GUIA_PASO_A_PASO_ESP32_MAGLEV.md).
+
 # Hardware del prototipo real
 
 Este documento describe el prototipo **tal como lo construyó el técnico**, no el diseño

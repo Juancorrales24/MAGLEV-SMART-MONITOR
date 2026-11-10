@@ -17,15 +17,26 @@ detecta con tres sensores infrarrojos, uno por estación.
    No se envían `panel_current` ni `power_output`: **no hay sensor de corriente**.
 3. **Cola FIFO de mensajes** en RAM, para no perder detecciones cuando llegan varias
    seguidas o la red se cae.
-4. **Pantalla LCD 1602 por I2C.** Muestra `TREN DETECTADO` / `ESTACION 2` al entrar y
-   `TREN SALIO` / `ESTACION 2` al salir, y entre eventos alterna estado de WiFi, tamaño
-   de la cola y voltajes. **Funciona sin internet**: la pantalla se actualiza desde la
-   detección local, antes de intentar cualquier envío.
-5. **Entrega HTTPS** a `POST /api/ingest` con verificación TLS real (`setCACert`, nunca
+4. **Pantalla LCD 1602 por I2C.** Muestra `ESTACION 2` mientras el sensor de esa
+   estación está activo, y la retiene **5 segundos tras la salida** (`RETENCION_ESTACION_MS`)
+   antes de volver a `SIN OBSTACULOS`; si otro sensor se activa antes de que expire, lo
+   reemplaza de inmediato. Si dos sensores están activos a la vez, se muestra el de
+   **menor número de estación** (prioridad 1 > 2 > 3) — esa prioridad es solo para lo que
+   se ve en LCD/web local, **no** afecta qué eventos se envían a Supabase: cada sensor
+   sigue reportando sus propias llegadas y salidas de forma independiente.
+5. **Web local por WiFi propio del ESP32** (`AP_SSID`/`AP_PASSWORD`, por defecto
+   `MAGLEV-MONITOR` / `Maglev2026`), en `http://192.168.4.1`. Muestra paneles, batería,
+   estado de las tres estaciones y el JSON crudo en `/datos`. **Funciona sin WiFi del
+   router ni credenciales de Supabase**: es el modo de prueba de banco sin conexión a
+   internet.
+6. **Entrega HTTPS** a `POST /api/ingest` con verificación TLS real (`setCACert`, nunca
    `setInsecure()`), hora por NTP para comprobar la vigencia del certificado,
    `Authorization: Bearer DEVICE_TOKEN`, `X-Device-Id` y un `sample_id` UUID v4 por
-   mensaje.
-6. **Entrada JSON por Serial**, una línea por mensaje, para bloques que el ESP32 no mide
+   mensaje. Se activa sola (`cloudConfigurada`) solo cuando `WIFI_SSID`, `DEVICE_ID`,
+   `DEVICE_TOKEN`, `ROOT_CA` y un `API_URL` con `https://` están completos en `config.h`;
+   si falta algo, el ESP32 arranca igual en modo local y lo dice por Serial, en vez de
+   quedarse colgado en el arranque.
+7. **Entrada JSON por Serial**, una línea por mensaje, para bloques que el ESP32 no mide
    (p. ej. `measurements`). El firmware no simula ni rellena nada: solo transporta lo
    que lee de sus pines o recibe por Serial.
 
@@ -47,7 +58,10 @@ detecta con tres sensores infrarrojos, uno por estación.
    subas `config.h` al repositorio.** Ahí no van claves de Supabase: el ESP32 solo
    conoce su `DEVICE_ID` y su `DEVICE_TOKEN`.
 5. Si tenías un `config.h` de una versión anterior, vuelve a copiarlo del ejemplo: le
-   faltan las constantes nuevas y la compilación se detiene con un `#error` que lo dice.
+   faltan las constantes nuevas y la compilación se detiene con un `#error` que lo dice
+   — **excepto** `AP_SSID`/`AP_PASSWORD` (red local nueva): si solo faltan esas dos, el
+   error del compilador es menos claro (`'AP_SSID' was not declared`); si lo ves,
+   añádelas a mano desde `config.h.example`.
 
 ## Decisiones de diseño
 

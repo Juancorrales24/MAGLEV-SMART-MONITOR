@@ -1,6 +1,12 @@
 #pragma once
 // Copiar este archivo como config.h y completar localmente. No compartir config.h.
+// El monitor local funciona con los valores predeterminados; la nube es opcional hasta configurarla.
 // Aqui no van claves de Supabase: el ESP32 solo conoce su DEVICE_ID y su DEVICE_TOKEN.
+
+// === Red local ESP32 (funciona sin Internet) ================================
+// Contraseña de 8 caracteres minimo. Cambiarla antes de la presentacion.
+const char* AP_SSID = "MAGLEV-MONITOR";
+const char* AP_PASSWORD = "Maglev2026";
 
 // === Red y API ==============================================================
 const char* WIFI_SSID = "";
@@ -49,11 +55,10 @@ const char* ROOT_CA = R"PEM(
 #define IR_PIN_ESTACION_2 26
 #define IR_PIN_ESTACION_3 27
 
-// Modo de la entrada. INPUT sirve para los módulos IR con salida digital tipo
-// comparador (FC-51, TCRT5000 con placa), que empujan el nivel activamente.
-// Usar INPUT_PULLUP si la salida es de colector abierto o es un fototransistor
-// desnudo. PENDIENTE DE CONFIRMAR con el módulo real.
-#define IR_MODO_ENTRADA INPUT
+// Se preserva INPUT_PULLUP como en el sketch original del usuario.
+// Comprobar que la salida digital de cada módulo no supere los 3.3 V.
+// La logica LOW/activo tambien queda intacta.
+#define IR_MODO_ENTRADA INPUT_PULLUP
 
 // Nivel activo de cada sensor: muchos módulos IR entregan LOW al detectar, pero no
 // todos. Se configura por estación para admitir módulos distintos en el mismo tren.
@@ -103,6 +108,4 @@ const bool IR_ACTIVO_EN_BAJO[3] = { true, true, true };
 #define LCD_PIN_SCL 22
 
 // Tiempos de la pantalla, para que se pueda leer y no parpadee.
-#define LCD_MS_MINIMO_EVENTO    1200UL // un evento nuevo espera a que el anterior se haya leído
-#define LCD_MS_RETENER_EVENTO   2500UL // cuánto se mantiene el evento antes de volver al estado
-#define LCD_MS_REFRESCO_ESTADO  2000UL // ritmo máximo de refresco de la pantalla de estado
+

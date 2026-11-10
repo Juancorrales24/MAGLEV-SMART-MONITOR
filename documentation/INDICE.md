@@ -1,3 +1,5 @@
+> **PRIMERO:** [Guía paso a paso ESP32 ↔ MAGLEV](GUIA_PASO_A_PASO_ESP32_MAGLEV.md) — carga, monitor local, Supabase, GitHub y envío HTTPS.
+
 # Índice de la documentación
 
 Proyecto académico **MAGLEV SMART MONITOR** — Electromagnetismo, Unidades Tecnológicas de

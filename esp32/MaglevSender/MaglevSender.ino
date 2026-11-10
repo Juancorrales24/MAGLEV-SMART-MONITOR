@@ -18,6 +18,7 @@
  * circuito real: pines IR, nivel activo, direccion I2C y pines SDA/SCL.
  */
 #include <WiFi.h>
+#include <WebServer.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -47,6 +48,13 @@ SET_LOOP_TASK_STACK_SIZE(12 * 1024);
 // Sin hora valida no se puede comprobar la vigencia del certificado TLS.
 const time_t HORA_MINIMA_VALIDA = 1735689600;
 
+// La web local funciona aun sin Internet. El envio a MAGLEV se habilita cuando
+// WiFi, API y credenciales esten configurados en config.h.
+WebServer localServer(80);
+bool cloudConfigurada = false;
+unsigned long eventosLocales = 0;
+int ultimoHttpCodigo = 0;
+unsigned long ultimoHttpCorrectoMs = 0;
 String inputLine;
 bool descartandoLinea = false;
 unsigned long ultimoEnvio = 0, ultimoWifi = 0, ultimaMuestraSolar = 0;
@@ -161,6 +169,8 @@ void dropNullMembers(JsonObject obj) {
 // viaja dentro de la ranura, asi que todos los reintentos reenvian el mismo:
 // la API responde 201 la primera vez y 200 (duplicada) si ya lo tenia.
 bool encolarDocumento(JsonDocument& doc, uint8_t clase) {
+  // Sin la configuracion remota no se llena una cola destinada a Internet.
+  if (!cloudConfigurada) return false;
   doc["sample_id"] = newSampleId();
   const size_t necesarios = measureJson(doc);
   if (necesarios + 1 > COLA_BYTES_POR_RANURA) {
@@ -179,16 +189,21 @@ bool encolarDocumento(JsonDocument& doc, uint8_t clase) {
 // Biblioteca: "LiquidCrystal I2C" de Frank de Brabander (ver esp32/README.md).
 // Si no esta instalada, poner LCD_ENABLED en 0 en config.h: el resto del firmware
 // compila y funciona igual, solo se queda sin pantalla.
+// Retencion LOCAL de la estacion, independiente de la latencia de Internet.
+// Se prioriza estacion 1 > 2 > 3 como en el programa original.
+const unsigned long RETENCION_ESTACION_MS = 5000UL;
+uint8_t estacionVisible = 0;
+uint8_t ultimaEstacionVisible = 0;
+bool estacionSensorActivo = false;
+unsigned long instanteSalidaVisible = 0;
+
 #if LCD_ENABLED
 LiquidCrystal_I2C lcd(LCD_DIRECCION_I2C, 16, 2);
 bool lcdPresente = false;
 char lcdLineas[2][17] = {"", ""};
-char lcdEventoL1[17] = "", lcdEventoL2[17] = "";
-bool lcdEventoPendiente = false, lcdMostrandoEvento = false, lcdEstadoAlterno = false;
-unsigned long lcdEventoDesde = 0, lcdUltimoRefresco = 0;
 #endif
 
-// Escribe solo las lineas que cambian: sin lcd.clear() no hay parpadeo.
+// Escribe solo si cambia el contenido. Evita parpadeos.
 void lcdEscribir(const char* l1, const char* l2) {
 #if LCD_ENABLED
   if (!lcdPresente) return;
@@ -202,52 +217,14 @@ void lcdEscribir(const char* l1, const char* l2) {
 #endif
 }
 
-// Se llama desde la deteccion local, antes de encolar nada: la pantalla muestra el
-// evento aunque no haya WiFi o la API devuelva error.
-void mostrarEventoLcd(uint8_t estacion, bool presencia) {
-#if LCD_ENABLED
-  snprintf(lcdEventoL1, sizeof(lcdEventoL1), "%s", presencia ? "TREN DETECTADO" : "TREN SALIO");
-  snprintf(lcdEventoL2, sizeof(lcdEventoL2), "ESTACION %u", (unsigned)estacion);
-  // Solo se guarda el evento mas reciente: si llegan dos en menos de
-  // LCD_MS_MINIMO_EVENTO, el intermedio no se pinta (si queda en el log Serial).
-  lcdEventoPendiente = true;
-#else
-  (void)estacion; (void)presencia;
-#endif
-}
-
 void atenderLcd(unsigned long ahora) {
+  (void)ahora;
 #if LCD_ENABLED
   if (!lcdPresente) return;
-  // Un evento nuevo espera a que el anterior haya estado LCD_MS_MINIMO_EVENTO en
-  // pantalla, para que se pueda leer.
-  if (lcdEventoPendiente &&
-      (!lcdMostrandoEvento || (unsigned long)(ahora - lcdEventoDesde) >= LCD_MS_MINIMO_EVENTO)) {
-    lcdEscribir(lcdEventoL1, lcdEventoL2);
-    lcdEventoPendiente = false; lcdMostrandoEvento = true; lcdEventoDesde = ahora;
-    return;
-  }
-  if (lcdMostrandoEvento) {
-    if ((unsigned long)(ahora - lcdEventoDesde) < LCD_MS_RETENER_EVENTO) return;
-    lcdMostrandoEvento = false;
-  }
-  if ((unsigned long)(ahora - lcdUltimoRefresco) < LCD_MS_REFRESCO_ESTADO) return;
-  lcdUltimoRefresco = ahora;
-  lcdEstadoAlterno = !lcdEstadoAlterno;
-  char l1[17], l2[17];
-  // colaUsadas nunca pasa de COLA_RANURAS, pero se acota a dos digitos para que la
-  // linea quepa siempre en las 16 columnas sin que snprintf tenga que truncarla.
-  snprintf(l1, sizeof(l1), "WiFi:%-2s Cola:%u",
-           WiFi.status() == WL_CONNECTED ? "OK" : "NO",
-           (unsigned)(colaUsadas > 99 ? 99 : colaUsadas));
-  // La segunda linea alterna bateria y panel cada LCD_MS_REFRESCO_ESTADO: el cambio
-  // es lo bastante lento para leerse y lcdEscribir() solo reescribe lo que cambia.
-  if (!solarValido) snprintf(l2, sizeof(l2), "Leyendo ADC...");
-  else if (lcdEstadoAlterno) snprintf(l2, sizeof(l2), "Bat %.2fV %3d%%", ultimaBateria, ultimoPorcentaje);
-  else snprintf(l2, sizeof(l2), "Panel %.2f V", ultimoPanel);
-  lcdEscribir(l1, l2);
-#else
-  (void)ahora;
+  char linea[17];
+  if (estacionVisible) snprintf(linea, sizeof(linea), "ESTACION %u", (unsigned)estacionVisible);
+  else snprintf(linea, sizeof(linea), "SIN OBSTACULOS");
+  lcdEscribir("SISTEMA ACTIVO", linea);
 #endif
 }
 
@@ -351,7 +328,7 @@ void registrarTransicion(uint8_t i, bool presencia, unsigned long instanteMs) {
   }
   irUltimaTransicionMs[i] = instanteMs;
   // La pantalla se actualiza antes de encolar: muestra el evento haya red o no.
-  mostrarEventoLcd(i + 1, presencia);
+  if (presencia) eventosLocales++;
   // train_status es estricto: exactamente station_number (entero 1-3) y detected.
   // No se envia sampled_at: el instante fiable que tiene el ESP32 es millis(), no una
   // fecha. Los eventos que salen de la cola tras un corte quedan sellados por el
@@ -402,6 +379,27 @@ void revisarSensoresIR(unsigned long ahora) {
       irEstable[i] = presenciaAhora;
       registrarTransicion(i, presenciaAhora, irCrudoDesde[i]);
     }
+  }
+}
+
+// Los eventos enviados a Supabase siguen siendo llegadas/salidas reales de
+// cada sensor. La prioridad 1 > 2 > 3 se aplica a lo que ve el usuario en LCD
+// y web local, igual que en el codigo original.
+void actualizarEstacionVisible(unsigned long ahora) {
+  uint8_t prioritaria = 0;
+  for (uint8_t i = 0; i < IR_ESTACIONES; i++) {
+    if (irEstable[i]) { prioritaria = i + 1; break; }
+  }
+  if (prioritaria) {
+    estacionVisible = prioritaria;
+    ultimaEstacionVisible = prioritaria;
+    estacionSensorActivo = true;
+  } else if (estacionSensorActivo) {
+    estacionSensorActivo = false;
+    instanteSalidaVisible = ahora;
+  } else if (estacionVisible &&
+             (unsigned long)(ahora - instanteSalidaVisible) >= RETENCION_ESTACION_MS) {
+    estacionVisible = 0;
   }
 }
 
@@ -488,6 +486,118 @@ void sampleSolarStation() {
 }
 
 // ---------------------------------------------------------------------------
+// Web local: no requiere acceso a Internet ni credenciales de Supabase.
+// Abrir http://192.168.4.1 conectado a la red propia del ESP32.
+// ---------------------------------------------------------------------------
+const char HTML_LOCAL[] PROGMEM = R"MAGLEVWEB(
+<!doctype html>
+<html lang="es"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MAGLEV · Monitor local</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,Arial,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#14354d,#07101b 65%);color:#eaf4ff}
+main{max-width:900px;margin:auto;padding:24px 16px 36px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:clamp(19px,4vw,26px);margin:0}small,.sub{color:#9cb1c9}
+.pill{border:1px solid #226c58;border-radius:999px;padding:8px 12px;background:#143a31;color:#80efc2;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+article{border:1px solid #294054;background:#162739;border-radius:20px;padding:21px}
+.t{font-size:14px;color:#c5d8ec;font-weight:600}.value{font-size:clamp(29px,6vw,44px);font-weight:800;margin:16px 0}
+.sun{color:#facc15}.bat{color:#4ade80}.full{grid-column:1/-1}
+.bar{background:#33475a;border-radius:20px;height:13px;overflow:hidden}.fill{background:#4ade80;width:0;height:100%;transition:width .3s}
+.stations{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:18px}
+.st{border:1px solid #3c5065;border-radius:14px;text-align:center;padding:17px 6px;background:#1c3043;transition:background .2s}
+.st.on{border-color:#3ad5ff;background:#114962}.st.detect{border-color:#4ade80;background:#15503f}
+.st strong{display:block;font-size:13px}.st .status{font-size:11px;color:#aebfd2;margin-top:7px}
+.st.on .status{color:#8be6ff}.st.detect .status{color:#9df4b3}
+.row{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #2a4054;padding:11px 0;font-size:13px}
+.row span:first-child{color:#aabdd1}.row span:last-child{text-align:right}
+footer{text-align:center;font-size:12px;color:#aabdd1;line-height:1.7;margin:22px 0}
+@media(max-width:490px){article{padding:15px}.st{padding:13px 4px}.st strong{font-size:11px}}
+</style></head><body><main>
+<header><div><h1>🚆 MAGLEV SMART MONITOR</h1><div class="sub">Monitor local · ESP32</div></div>
+<span id="conexion" class="pill">Conectando...</span></header>
+<div class="grid">
+<article><div class="t">☀ PANEL SOLAR</div><div id="panel" class="value sun">-- V</div><small>Voltaje del panel</small></article>
+<article><div class="t">🔋 BATERÍA 18650</div><div id="bat" class="value bat">-- V</div>
+<div class="bar"><div id="fill" class="fill"></div></div><small id="pct">Carga estimada: --%</small></article>
+<article class="full"><div class="t">🚉 ESTACIONES · PRIORIDAD 1 → 2 → 3</div>
+<div class="stations"><div class="st" id="e1"><strong>ESTACIÓN 1</strong><div class="status" id="s1">Libre</div></div>
+<div class="st" id="e2"><strong>ESTACIÓN 2</strong><div class="status" id="s2">Libre</div></div>
+<div class="st" id="e3"><strong>ESTACIÓN 3</strong><div class="status" id="s3">Libre</div></div></div>
+<div class="row"><span>Estación mostrada</span><span id="actual">SIN OBSTÁCULOS</span></div>
+<div class="row"><span>Última estación detectada</span><span id="ultima">NINGUNA</span></div>
+<div class="row"><span>Tiempo restante en LCD</span><span id="resto">—</span></div>
+<div class="row"><span>Detecciones desde encendido</span><span id="eventos">0</span></div></article>
+<article class="full"><div class="t">📡 ESTADO DEL SISTEMA</div>
+<div class="row"><span>WiFi del router</span><span id="wifi">—</span></div>
+<div class="row"><span>Envío HTTPS a MAGLEV</span><span id="cloud">—</span></div>
+<div class="row"><span>Última respuesta HTTP</span><span id="http">—</span></div>
+<div class="row"><span>Mensajes pendientes</span><span id="cola">0</span></div></article>
+</div><footer>Datos leídos del ESP32 · Actualización cada 0,5 s<br>
+La retención del nombre no significa que el tren siga frente al sensor.</footer>
+</main><script>
+const el=id=>document.getElementById(id);let ocupado=false;
+async function actualizar(){if(ocupado)return;ocupado=true;try{
+const r=await fetch('/datos',{cache:'no-store'});if(!r.ok)throw Error('HTTP');const d=await r.json();
+el('conexion').textContent='● Conectado al ESP32';
+el('panel').textContent=d.panel===null?'-- V':d.panel.toFixed(2)+' V';
+el('bat').textContent=d.bateria===null?'-- V':d.bateria.toFixed(2)+' V';
+el('fill').style.width=d.porcentaje===null?'0%':d.porcentaje+'%';
+el('pct').textContent='Carga estimada: '+(d.porcentaje===null?'--':d.porcentaje)+'%';
+el('actual').textContent=d.estacion?'ESTACIÓN '+d.estacion:'SIN OBSTÁCULOS';
+el('ultima').textContent=d.ultima?'ESTACIÓN '+d.ultima:'NINGUNA';
+el('resto').textContent=d.detectando?'Sensor activo':d.restanteMs?(d.restanteMs/1000).toFixed(1)+' s':'—';
+el('eventos').textContent=d.eventos;el('wifi').textContent=d.wifi?'Conectado':'Sin router';
+el('cloud').textContent=d.cloud?'Configurado':'Pendiente';el('http').textContent=d.ultimoHttp===null?'Sin envíos':'HTTP '+d.ultimoHttp;el('cola').textContent=d.cola;
+for(let i=1;i<=3;i++){const n=el('e'+i);n.className='st'+(d.estacion===i?(d.detectando?' detect':' on'):'');
+el('s'+i).textContent=d.estacion===i?(d.detectando?'Detectando':'Retenido 5 s'):'Libre';}
+}catch(e){el('conexion').textContent='● Sin comunicación con ESP32';}finally{ocupado=false;}}
+actualizar();setInterval(actualizar,500);
+</script></body></html>
+)MAGLEVWEB";
+
+void enviarDatosLocales() {
+  unsigned long resto = 0;
+  if (!estacionSensorActivo && estacionVisible) {
+    const unsigned long tiempo = (unsigned long)(millis() - instanteSalidaVisible);
+    if (tiempo < RETENCION_ESTACION_MS) resto = RETENCION_ESTACION_MS - tiempo;
+  }
+  JsonDocument doc;
+  if (solarValido) {
+    doc["panel"] = ultimoPanel;
+    doc["bateria"] = ultimaBateria;
+    doc["porcentaje"] = ultimoPorcentaje;
+  } else {
+    doc["panel"] = nullptr; doc["bateria"] = nullptr; doc["porcentaje"] = nullptr;
+  }
+  doc["estacion"] = estacionVisible;
+  doc["ultima"] = ultimaEstacionVisible;
+  doc["detectando"] = estacionSensorActivo;
+  doc["restanteMs"] = resto;
+  doc["eventos"] = eventosLocales;
+  doc["wifi"] = (WiFi.status() == WL_CONNECTED);
+  doc["cloud"] = cloudConfigurada;
+  if (ultimoHttpCodigo) doc["ultimoHttp"] = ultimoHttpCodigo;
+  else doc["ultimoHttp"] = nullptr;
+  doc["cola"] = colaUsadas;
+  String salida;
+  serializeJson(doc, salida);
+  localServer.sendHeader("Cache-Control", "no-store");
+  localServer.send(200, "application/json", salida);
+}
+
+void iniciarServidorLocal() {
+  localServer.on("/", HTTP_GET, []() {
+    localServer.send_P(200, "text/html; charset=utf-8", HTML_LOCAL);
+  });
+  localServer.on("/datos", HTTP_GET, enviarDatosLocales);
+  localServer.onNotFound([]() { localServer.send(404, "text/plain", "No encontrado"); });
+  localServer.begin();
+}
+
+// ---------------------------------------------------------------------------
 // Entrada JSON por Serial (bloques que no mide el ESP32, p. ej. measurements)
 // ---------------------------------------------------------------------------
 void acceptSensorLine(const String& line) {
@@ -548,6 +658,8 @@ void enviarFrenteDeCola() {
   http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
   http.addHeader("X-Device-Id", DEVICE_ID);
   const int code = http.POST(String(cola[colaInicio].json));
+  ultimoHttpCodigo = code;
+  if (code == 200 || code == 201) ultimoHttpCorrectoMs = millis();
   http.end();
   // El limite de 1 mensaje/s se mide desde que TERMINA el POST: mas conservador que
   // la ventana del servidor, que la mide entre mensajes aceptados.
@@ -584,46 +696,76 @@ void enviarFrenteDeCola() {
 void setup() {
   Serial.begin(115200);
   inputLine.reserve(SERIAL_MAX_LINEA + 1);
-  if (!strlen(WIFI_SSID) || !strlen(DEVICE_ID) || !strlen(DEVICE_TOKEN) || strlen(ROOT_CA) < 100 || !String(API_URL).startsWith("https://")) {
-    Serial.println("Completa config.h: WiFi, HTTPS, dispositivo, clave y certificado CA.");
-    while (true) delay(1000);
-  }
+
+  // Se permite el modo local sin credenciales de Internet.
+  cloudConfigurada = strlen(WIFI_SSID) > 0 && strlen(DEVICE_ID) > 0 &&
+    strlen(DEVICE_TOKEN) > 0 && strlen(ROOT_CA) > 100 &&
+    String(API_URL).startsWith("https://");
+
   iniciarLcd();
   iniciarSensoresIR();
   analogReadResolution(12);
   analogSetPinAttenuation(PIN_PANEL, ADC_11db);
   analogSetPinAttenuation(PIN_BATERIA, ADC_11db);
-  WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
+
+  // Se mantienen dos interfaces: AP local y STA para conectar al router.
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+  if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+    Serial.printf("RED MAGLEV LOCAL: %s | IP: %s\n",
+                  AP_SSID, WiFi.softAPIP().toString().c_str());
+  } else {
+    Serial.println("AVISO: no se pudo iniciar el punto de acceso local.");
+  }
+  iniciarServidorLocal();
+
+  if (strlen(WIFI_SSID) > 0) {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
+    Serial.printf("Conectando al router: %s\n", WIFI_SSID);
+  }
+  if (!cloudConfigurada) {
+    Serial.println("MODO LOCAL: completa API_URL, DEVICE_ID, DEVICE_TOKEN, ROOT_CA y WiFi para enviar a MAGLEV.");
+  } else {
+    Serial.println("Modo remoto listo para enviar datos a MAGLEV por HTTPS verificado.");
+  }
   const unsigned long ahora = millis();
   ultimoEnvio = ahora; ultimoWifi = ahora; ultimaMuestraSolar = ahora;
-  Serial.printf("Listo: 3 sensores IR, panel solar y bateria por ADC, cola de %u mensajes "
-                "(%u B por ranura). Tambien acepta lineas JSON por Serial.\n",
-                (unsigned)COLA_RANURAS, (unsigned)COLA_BYTES_POR_RANURA);
+  revisarSensoresIR(ahora);
+  actualizarEstacionVisible(ahora);
+  atenderLcd(ahora);
+  Serial.printf("ESP32 listo. Sensores GPIO 25/26/27, pantalla retenida %lu ms, cola de %u.\n",
+                RETENCION_ESTACION_MS, (unsigned)COLA_RANURAS);
 }
 
 void loop() {
   unsigned long ahora = millis();
-  // Los sensores primero: es lo unico que no se puede recuperar si se pierde.
+  // Priorizar los sensores incluso cuando no hay WiFi.
   revisarSensoresIR(ahora);
+  actualizarEstacionVisible(ahora);
   atenderLcd(ahora);
+  localServer.handleClient();
 
-  if (WiFi.status() != WL_CONNECTED && (unsigned long)(ahora - ultimoWifi) >= WIFI_REINTENTO_MS) {
-    ultimoWifi = ahora; WiFi.reconnect();
+  if (strlen(WIFI_SSID) > 0 && WiFi.status() != WL_CONNECTED &&
+      (unsigned long)(ahora - ultimoWifi) >= WIFI_REINTENTO_MS) {
+    ultimoWifi = ahora;
+    WiFi.reconnect();
   }
 
   leerSerial();
-
   if ((unsigned long)(ahora - ultimaMuestraSolar) >= SOLAR_INTERVALO_MS) {
     ultimaMuestraSolar = ahora;
     sampleSolarStation();
     ahora = millis();
-    revisarSensoresIR(ahora); // el muestreo ADC tarda unos ms: atender los flancos ya
+    revisarSensoresIR(ahora);
+    actualizarEstacionVisible(ahora);
+    atenderLcd(ahora);
   }
-
-  if (colaUsadas == 0 || WiFi.status() != WL_CONNECTED) { delay(1); return; }
+  // El modo local funciona aun cuando no esta configurada la API.
+  if (!cloudConfigurada || colaUsadas == 0 || WiFi.status() != WL_CONNECTED) {
+    delay(1); return;
+  }
   if ((unsigned long)(ahora - ultimoEnvio) < reintentoMs) { delay(1); return; }
-  // TLS requiere hora valida para comprobar la vigencia del certificado.
   if (time(nullptr) < HORA_MINIMA_VALIDA) { delay(1); return; }
   enviarFrenteDeCola();
 }
