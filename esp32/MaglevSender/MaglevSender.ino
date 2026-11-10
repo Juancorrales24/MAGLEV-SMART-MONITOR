@@ -214,6 +214,63 @@ bool encolarDocumento(JsonDocument& doc, uint8_t clase) {
 // Retencion LOCAL de la estacion, independiente de la latencia de Internet.
 // Se prioriza estacion 1 > 2 > 3 como en el programa original.
 const unsigned long RETENCION_ESTACION_MS = 5000UL;
+
+// Nombres de las estaciones definidos en la web (Configuracion -> Estaciones de la via).
+// Llegan dentro de la respuesta de cada envio aceptado (campo "stations"), asi que un
+// renombrado en la pagina aparece aqui en el siguiente mensaje: con la muestra solar
+// cada SOLAR_INTERVALO_MS, unos segundos como mucho. Vacio = aun no recibido o nombre
+// sin caracteres representables: la LCD usa entonces "ESTACION N". Los escribe tareaRed
+// (nucleo 0) al procesar respuestas y los lee loop() (nucleo 1) al pintar la LCD, por
+// eso el mutex. Se pierden al reiniciar y se recuperan con el primer envio aceptado.
+SemaphoreHandle_t nombresMutex = nullptr;
+char nombresEstacion[3][17] = { "", "", "" };
+
+// Copia un texto UTF-8 a lo que la LCD 1602 puede mostrar (ASCII imprimible, 16
+// caracteres): las vocales acentuadas y la enie pierden la tilde (a con tilde -> a,
+// enie -> n) porque el controlador HD44780 no las tiene en su tabla, y cualquier otro
+// caracter no representable se omite. Devuelve false si no quedo ningun caracter util.
+bool utf8ParaLcd(char* destino, size_t tam, const char* fuente) {
+  size_t escrito = 0;
+  for (const unsigned char* p = (const unsigned char*)fuente; *p && escrito + 1 < tam;) {
+    unsigned char c = *p;
+    if (c >= 0x20 && c <= 0x7E) { destino[escrito++] = (char)c; p++; continue; }
+    if (c == 0xC3 && p[1]) {
+      // Segunda unidad de la secuencia UTF-8 de dos bytes de los caracteres latinos.
+      char plano = 0;
+      switch (p[1]) {
+        case 0xA1: plano = 'a'; break; case 0x81: plano = 'A'; break; // a/A con tilde
+        case 0xA9: plano = 'e'; break; case 0x89: plano = 'E'; break;
+        case 0xAD: plano = 'i'; break; case 0x8D: plano = 'I'; break;
+        case 0xB3: plano = 'o'; break; case 0x93: plano = 'O'; break;
+        case 0xBA: plano = 'u'; break; case 0x9A: plano = 'U'; break;
+        case 0xBC: plano = 'u'; break; case 0x9C: plano = 'U'; break; // u con dieresis
+        case 0xB1: plano = 'n'; break; case 0x91: plano = 'N'; break; // enie
+        default: break;
+      }
+      if (plano) destino[escrito++] = plano;
+      p += 2; continue;
+    }
+    // Resto de secuencias multibyte: saltar la secuencia completa sin escribir nada.
+    p++;
+    while ((*p & 0xC0) == 0x80) p++;
+  }
+  destino[escrito] = '\0';
+  // Un nombre solo de espacios tampoco sirve como etiqueta: se devuelve vacio.
+  for (size_t i = 0; i < escrito; i++) if (destino[i] != ' ') return true;
+  destino[0] = '\0';
+  return false;
+}
+
+// Nombre a mostrar para la estacion 1-3: el de la web si ya llego, o "ESTACION N".
+void nombreParaLcd(uint8_t estacion, char* destino, size_t tam) {
+  destino[0] = '\0';
+  if (estacion >= 1 && estacion <= 3 && nombresMutex) {
+    xSemaphoreTake(nombresMutex, portMAX_DELAY);
+    snprintf(destino, tam, "%s", nombresEstacion[estacion - 1]);
+    xSemaphoreGive(nombresMutex);
+  }
+  if (!destino[0]) snprintf(destino, tam, "ESTACION %u", (unsigned)estacion);
+}
 uint8_t estacionVisible = 0;
 uint8_t ultimaEstacionVisible = 0;
 bool estacionSensorActivo = false;
@@ -244,7 +301,7 @@ void atenderLcd(unsigned long ahora) {
 #if LCD_ENABLED
   if (!lcdPresente) return;
   char linea[17];
-  if (estacionVisible) snprintf(linea, sizeof(linea), "ESTACION %u", (unsigned)estacionVisible);
+  if (estacionVisible) nombreParaLcd(estacionVisible, linea, sizeof(linea));
   else snprintf(linea, sizeof(linea), "SIN OBSTACULOS");
   lcdEscribir("SISTEMA ACTIVO", linea);
 #endif
@@ -690,6 +747,33 @@ void leerSerial() {
 // ---------------------------------------------------------------------------
 // Envio HTTPS del frente de la cola — corre en tareaRed (nucleo 0), nunca en loop().
 // ---------------------------------------------------------------------------
+// La respuesta de un envio aceptado trae los nombres de las estaciones puestos en la
+// web. Se guardan para la LCD; una respuesta sin el campo "stations" (servidor
+// anterior) o que no sea JSON se ignora sin tocar lo que ya habia.
+void procesarRespuestaIngest(const String& cuerpo) {
+  JsonDocument doc;
+  if (deserializeJson(doc, cuerpo) != DeserializationError::Ok) return;
+  JsonArray lista = doc["stations"].as<JsonArray>();
+  if (lista.isNull()) return;
+  for (JsonObject e : lista) {
+    const int pos = e["position"] | 0;
+    const char* nombre = e["name"] | "";
+    if (pos < 1 || pos > 3) continue;
+    char limpio[17];
+    if (!utf8ParaLcd(limpio, sizeof(limpio), nombre)) limpio[0] = '\0';
+    bool cambio = false;
+    xSemaphoreTake(nombresMutex, portMAX_DELAY);
+    if (strcmp(nombresEstacion[pos - 1], limpio) != 0) {
+      cambio = true;
+      snprintf(nombresEstacion[pos - 1], sizeof(nombresEstacion[pos - 1]), "%s", limpio);
+    }
+    xSemaphoreGive(nombresMutex);
+    if (cambio)
+      Serial.printf("LCD: la estacion %d se mostrara como \"%s\".\n",
+                    pos, limpio[0] ? limpio : "ESTACION N (por defecto)");
+  }
+}
+
 // Un POST sobre la conexion persistente. Devuelve el codigo HTTP (o el negativo de
 // HTTPClient) e indica si iba sobre una conexion ya abierta. Ante un error de red
 // cierra el socket, para que el siguiente intento empiece con un handshake limpio.
@@ -708,8 +792,10 @@ int postTelemetria(const char* mensaje, bool& reutilizada) {
   httpCliente.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
   httpCliente.addHeader("X-Device-Id", DEVICE_ID);
   const int code = httpCliente.POST(String(mensaje));
-  // Leer el cuerpo (pocos bytes) deja la conexion limpia para el siguiente mensaje.
-  if (code > 0) httpCliente.getString();
+  // Leer el cuerpo deja la conexion limpia para el siguiente mensaje; el de un envio
+  // aceptado ademas trae los nombres de las estaciones para la LCD.
+  if (code == 200 || code == 201) procesarRespuestaIngest(httpCliente.getString());
+  else if (code > 0) httpCliente.getString();
   httpCliente.end(); // con keep-alive no cierra el socket; solo limpia la peticion
   if (code < 0) {
     ultimoTlsError[0] = '\0';
@@ -813,6 +899,7 @@ void setup() {
   Serial.begin(115200);
   inputLine.reserve(SERIAL_MAX_LINEA + 1);
   colaMutex = xSemaphoreCreateMutex();
+  nombresMutex = xSemaphoreCreateMutex();
 
   // Se permite el modo local sin credenciales de Internet.
   cloudConfigurada = strlen(WIFI_SSID) > 0 && strlen(DEVICE_ID) > 0 &&
