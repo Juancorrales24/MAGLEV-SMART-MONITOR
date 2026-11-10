@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stationViews, lastDetection, activeStation, linkState, eventKindLabel, sensorEvents, stationName } from '../lib/train-state';
+import { stationViews, lastDetection, activeStation, shownDetection, linkState, eventKindLabel, sensorEvents, stationName } from '../lib/train-state';
 import type { Station, TrainStatus } from '../lib/database.types';
 // Filas de prueba: nunca se cargan en la aplicación ni en Supabase.
 let counter = 0;
@@ -87,4 +87,22 @@ test('cada motivo de no recepción tiene su propio estado', () => {
   assert.equal(linkState({ ...base, error: 'fallo de lectura' }).key, 'error');
   // El error de lectura se antepone a cualquier otra lectura del estado.
   assert.equal(linkState({ ...base, error: 'fallo', receiving: true, lastSeen: '2026-11-07T10:00:00Z' }).ok, false);
+});
+
+test('la retención muestra el paso recién recibido aunque el sensor ya esté libre', () => {
+  const rows = [event(2, true, '2026-11-07T10:00:00Z'), event(2, false, '2026-11-07T10:00:01Z')];
+  const views = stationViews(rows, stations);
+  assert.equal(activeStation(views), null);
+  const shown = shownDetection(views, 2);
+  assert.equal(shown?.view.position, 2);
+  assert.equal(shown?.held, true);
+  // Sin retención vigente no se inventa ninguna detección.
+  assert.equal(shownDetection(views, null), null);
+});
+
+test('la presencia activa tiene prioridad sobre la retención de otra estación', () => {
+  const rows = [event(1, true, '2026-11-07T10:00:00Z'), event(1, false, '2026-11-07T10:00:01Z'), event(3, true, '2026-11-07T10:00:04Z')];
+  const shown = shownDetection(stationViews(rows, stations), 1);
+  assert.equal(shown?.view.position, 3);
+  assert.equal(shown?.held, false);
 });

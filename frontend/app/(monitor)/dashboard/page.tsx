@@ -6,13 +6,13 @@ import { PageTitle, Panel, MetricCard, StatCard, StatusPill, MiniLink, LoadingSt
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { TrainEvents } from '@/components/TrainEvents';
 import { SolarTable } from '@/components/SolarTable';
-import { activeStation, lastDetection, sensorEvents, stationName, stationViews } from '@/lib/train-state';
+import { lastDetection, sensorEvents, shownDetection, stationName, stationViews, DETECTION_HOLD_MS } from '@/lib/train-state';
 import { dateTime, relativeAge, NO_DATA } from '@/lib/format';
 export default function Dashboard() {
   const f = useTelemetry(); const { device, link } = useLiveState(); const s = f.solar[0];
   const views = useMemo(() => stationViews(f.train, f.stations), [f.train, f.stations]);
   const events = useMemo(() => sensorEvents(f.train), [f.train]);
-  const active = activeStation(views); const last = lastDetection(f.train);
+  const shown = shownDetection(views, f.heldStation); const last = lastDetection(f.train);
   return <>
     <PageTitle eyebrow="CENTRO DE CONTROL" title="Vista general" description="Detección del tren por estación y energía de la estación solar."/>
     <ConnectionStatus/>
@@ -21,9 +21,11 @@ export default function Dashboard() {
         <StatCard label="Última estación detectada" icon={MapPin} accent="red"
           value={last?.station_number ? stationName(f.stations, last.station_number) : NO_DATA}
           detail={last ? `${dateTime(last.created_at)} · ${relativeAge(last.created_at, f.now)}` : 'Todavía no se ha registrado ninguna llegada.'}/>
-        <StatCard label="Estado de la detección" icon={Radio} accent="navy" tone={active ? 'on' : 'off'}
-          value={active ? 'Tren detectado' : 'Sin detección activa'}
-          detail={active ? `Sensor activo en ${active.name}.` : 'Ningún sensor reporta presencia del tren ahora mismo.'}/>
+        <StatCard label="Estado de la detección" icon={Radio} accent="navy" tone={shown ? 'on' : 'off'}
+          value={shown ? 'Tren detectado' : 'Sin detección activa'}
+          detail={!shown ? 'Ningún sensor reporta presencia del tren ahora mismo.'
+            : shown.held ? `Paso recién detectado en ${shown.view.name}; visible ${DETECTION_HOLD_MS / 1000} s, como en la pantalla LCD.`
+            : `Sensor activo en ${shown.view.name}.`}/>
         <MetricCard label="Voltaje del panel" value={s?.panel_voltage} unit="V" icon={Sun} accent="navy"
           detail={s?.panel_voltage == null ? `${NO_DATA}: sin lectura del panel.` : `Medido ${dateTime(s.created_at)}`}/>
         <MetricCard label="Voltaje de la batería" value={s?.battery_voltage} unit="V" icon={BatteryCharging} accent="navy"

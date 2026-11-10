@@ -58,6 +58,32 @@ export function activeStation(views: StationView[]) {
   return views.find(v => v.present) ?? null;
 }
 
+/**
+ * Tiempo que el panel mantiene visible una llegada recién recibida. Es el mismo que
+ * RETENCION_ESTACION_MS del firmware (pantalla LCD): el tren está delante del sensor apenas
+ * unas décimas de segundo, y sin retención la llegada y la salida suelen llegar en la misma
+ * actualización, de modo que el panel no alcanzaba a mostrar el paso.
+ */
+export const DETECTION_HOLD_MS = 5000;
+
+export type ShownDetection = {
+  view: StationView;
+  /** true = el sensor ya no reporta presencia; se muestra el paso recién recibido, no una medición en curso. */
+  held: boolean;
+};
+
+/**
+ * Estación a destacar: la que tiene presencia activa o, si el tren ya salió del sensor, la de la
+ * llegada que el panel acaba de recibir. `held` las distingue para no presentar la retención
+ * como presencia medida.
+ */
+export function shownDetection(views: StationView[], heldPosition: number | null): ShownDetection | null {
+  const active = activeStation(views);
+  if (active) return { view: active, held: false };
+  const held = heldPosition == null ? null : views.find(v => v.position === heldPosition) ?? null;
+  return held ? { view: held, held: true } : null;
+}
+
 export type EventKind = 'arrival' | 'departure';
 export function eventKind(row: TrainStatus): EventKind | null {
   return row.detected === true ? 'arrival' : row.detected === false ? 'departure' : null;

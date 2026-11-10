@@ -10,16 +10,18 @@ import { dateTime, relativeAge, NO_DATA } from '@/lib/format';
  * de velocidad ni de sentido de marcha, así que el tren NO se dibuja ni se anima desplazándose
  * entre estaciones. El tramo entre dos estaciones se representa como un segmento de vía sin estado.
  */
-export function StationMap({ views, lastOverall, now }: { views: StationView[]; lastOverall: StationView | null; now: number }) {
+export function StationMap({ views, lastOverall, now, held = null }: { views: StationView[]; lastOverall: StationView | null; now: number; held?: number | null }) {
   return (
     <div className="station-map">
       <p className="station-map-note">Esquema conceptual de la vía. La posición del tren entre estaciones no se mide: solo se muestran los eventos de los tres sensores infrarrojos.</p>
       <ol className="station-track" aria-label="Estado de los tres sensores de estación">
         {views.map((view, index) => {
-          const isLast = !view.present && lastOverall?.position === view.position;
-          const state = view.present ? 'present' : isLast ? 'last' : view.lastEvent ? 'idle' : 'unknown';
-          const status = view.present ? 'Tren detectado' : isLast ? 'Última estación detectada' : view.lastEvent ? 'Sin detección activa' : 'Sin registros de este sensor';
-          const Icon = view.present ? Radio : isLast ? History : view.lastEvent ? CircleSlash : MapPin;
+          // `held`: paso recién recibido cuyo sensor ya quedó libre; se destaca unos segundos, como la LCD.
+          const isHeld = !view.present && held === view.position;
+          const isLast = !view.present && !isHeld && lastOverall?.position === view.position;
+          const state = view.present || isHeld ? 'present' : isLast ? 'last' : view.lastEvent ? 'idle' : 'unknown';
+          const status = view.present ? 'Tren detectado' : isHeld ? 'Paso recién detectado' : isLast ? 'Última estación detectada' : view.lastEvent ? 'Sin detección activa' : 'Sin registros de este sensor';
+          const Icon = view.present || isHeld ? Radio : isLast ? History : view.lastEvent ? CircleSlash : MapPin;
           return (
             <li key={view.position} className={`station-node state-${state}`}>
               {index > 0 && <span className="station-rail" aria-hidden/>}
@@ -42,7 +44,7 @@ export function StationMap({ views, lastOverall, now }: { views: StationView[]; 
         })}
       </ol>
       <ul className="station-legend">
-        <li><span className="legend-chip state-present" aria-hidden/>Detección activa</li>
+        <li><span className="legend-chip state-present" aria-hidden/>Detección activa o paso recién detectado</li>
         <li><span className="legend-chip state-last" aria-hidden/>Última estación detectada</li>
         <li><span className="legend-chip state-idle" aria-hidden/>Sin detección activa</li>
         <li><span className="legend-chip state-unknown" aria-hidden/>Sin registros</li>
