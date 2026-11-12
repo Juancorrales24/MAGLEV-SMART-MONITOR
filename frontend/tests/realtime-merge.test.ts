@@ -65,3 +65,34 @@ test('reemplazar devuelve el mismo array si no encuentra la fila: hay que recarg
   assert.equal(reemplazarFila(previo, { id: 'nuevo', n: 5 }), previo);
   assert.equal(reemplazarFila(previo, null), previo);
 });
+
+// --- Salud del canal Realtime ---
+import { intervaloSondeo, canalRoto, siguienteEspera, SONDEO_CANAL_VIVO_MS, SONDEO_CANAL_CAIDO_MS, ESPERA_RECONEXION_MIN_MS, ESPERA_RECONEXION_MAX_MS } from '../lib/realtime-merge';
+
+test('con el canal vivo el sondeo es lento; caído, rápido', () => {
+  assert.equal(intervaloSondeo('SUBSCRIBED'), SONDEO_CANAL_VIVO_MS);
+  for (const estado of ['CONNECTING', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED']) {
+    assert.equal(intervaloSondeo(estado), SONDEO_CANAL_CAIDO_MS, estado);
+  }
+  assert.ok(SONDEO_CANAL_CAIDO_MS < SONDEO_CANAL_VIVO_MS);
+});
+
+test('solo los estados terminales obligan a recrear el canal', () => {
+  for (const estado of ['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED']) assert.ok(canalRoto(estado), estado);
+  for (const estado of ['SUBSCRIBED', 'CONNECTING', 'JOINING', '']) assert.ok(!canalRoto(estado), estado || '(vacío)');
+});
+
+test('la espera de reconexión crece exponencialmente y queda acotada', () => {
+  let espera = ESPERA_RECONEXION_MIN_MS;
+  const vistas: number[] = [];
+  for (let i = 0; i < 8; i++) { vistas.push(espera); espera = siguienteEspera(espera); }
+  assert.deepEqual(vistas.slice(0, 5), [1000, 2000, 4000, 8000, 15000]);
+  assert.equal(espera, ESPERA_RECONEXION_MAX_MS); // nunca pasa del tope: no se rinde, pero no martillea
+});
+
+test('una espera corrupta vuelve al rango válido', () => {
+  for (const mala of [0, -5, NaN, Infinity * 0]) {
+    const siguiente = siguienteEspera(mala);
+    assert.ok(siguiente >= ESPERA_RECONEXION_MIN_MS && siguiente <= ESPERA_RECONEXION_MAX_MS, String(mala));
+  }
+});
