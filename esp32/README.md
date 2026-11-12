@@ -63,6 +63,35 @@ detecta con tres sensores infrarrojos, uno por estación.
    error del compilador es menos claro (`'AP_SSID' was not declared`); si lo ves,
    añádelas a mano desde `config.h.example`.
 
+## Sketch de diagnóstico (`esp32/MaglevDiagnostico/`)
+
+Sketch **aparte**, para localizar averías sin multímetro. No envía nada a Internet, no
+toca la base de datos y no necesita `config.h`: solo mide y escribe por el Monitor Serie.
+Se sube como cualquier otro sketch y después se vuelve a subir `MaglevSender`.
+
+Hace tres pruebas y queda en modo continuo:
+
+1. **Sensores en reposo con la radio apagada.** Tres segundos leyendo los tres pines a
+   ~1 kHz. Imprime una tira legible (`1` = libre, `0` = presencia), cuenta cada transición
+   y da un veredicto: estable, pegado en presencia u oscilando. En reposo y sano debe dar
+   todo unos y **cero** cambios.
+2. **Redes WiFi visibles.** Lista cada nombre **entre corchetes**, para que se vean los
+   espacios al principio o al final, con su potencia y canal. Si se rellena
+   `SSID_A_BUSCAR` con el `WIFI_SSID` de `config.h`, avisa cuando la red no aparece tal
+   cual pero sí una que solo difiere en mayúsculas o espacios — el fallo típico. Las redes
+   de 5 GHz no aparecen porque el ESP32 no las ve.
+3. **Los mismos sensores con la radio trabajando** a potencia máxima (punto de acceso
+   encendido y rastreo asíncrono): el peor caso de consumo.
+
+La conclusión compara 1 con 3: si un sensor estaba bien con la radio apagada y falla con
+la radio activa, el problema es de **alimentación**; si falla en ambas, es de **cableado**.
+Después queda imprimiendo una línea por segundo para menear cables o pasar la mano por
+delante de un sensor y ver cuál responde mal.
+
+La lógica de muestreo y los veredictos están probados en escritorio con `g++` +
+AddressSanitizer/UBSan y señales sintéticas (sensor sano, pegado, oscilando, paso limpio,
+muestreo largo y desbordamiento de `millis()`).
+
 ## Decisiones de diseño
 
 ### Antirrebote y detección
