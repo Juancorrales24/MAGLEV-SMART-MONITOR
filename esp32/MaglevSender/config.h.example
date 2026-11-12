@@ -80,6 +80,15 @@ const bool IR_ACTIVO_EN_BAJO[3] = { true, true, true };
 // tarde y dos pasos separados por menos se verían como uno.
 #define IR_SALIDA_ESTABLE_MS 250UL
 
+// Cuánto retiene la pantalla LCD el nombre de la estación después de que el tren sale
+// del sensor. ARITMÉTICA: el tren tarda ~4,1 s en ir de una estación a la siguiente (el
+// tramo más corto medido), y pasa por delante del sensor solo ~0,1 s. Este valor debe
+// quedar CLARAMENTE por debajo de ese tramo más corto; si no, antes de que expire ya
+// llegó la estación siguiente y la pantalla no vuelve nunca a "SIN OBSTACULOS".
+// Con 2 s se alterna de forma legible: ~2,3 s con el nombre y ~1,8 s sin nada.
+// Si cambias la velocidad del tren, revisa este valor.
+#define RETENCION_ESTACION_MS 2000UL
+
 // Cada cuánto envía el ESP32 su muestra de salud (motivo del último arranque, tiempo
 // encendido, RSSI, heap libre y mensajes descartados). Se omite el latido si hay
 // mensajes de tren esperando: la salud nunca compite con los eventos.

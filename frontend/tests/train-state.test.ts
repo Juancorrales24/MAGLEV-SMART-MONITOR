@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stationViews, lastDetection, activeStation, shownDetection, segmentStats, lapStats, nextStation, linkState, eventKindLabel, sensorEvents, stationName } from '../lib/train-state';
+import { stationViews, lastDetection, activeStation, shownDetection, segmentStats, lapStats, nextStation, linkState, eventKindLabel, sensorEvents, stationName, DETECTION_HOLD_MS, HOLD_MAX_SEGURO_MS } from '../lib/train-state';
 import { restartsInWindow, resetReasonLabel, formatUptime, latestHealth } from '../lib/device-health';
 import type { DeviceHealth } from '../lib/database.types';
 import type { Station, TrainStatus } from '../lib/database.types';
@@ -167,4 +167,14 @@ test('salud: etiquetas de arranque conocidas, texto crudo para lo desconocido y 
   assert.equal(formatUptime(125), '2 min 5 s');
   assert.equal(formatUptime(7260), '2 h 1 min');
   assert.equal(formatUptime(null), null);
+});
+
+test('la retención deja hueco para mostrar «Sin detección activa»', () => {
+  // Con el tren en marcha llega una estación cada ~4,1 s (tramo más corto medido). Si la
+  // retención alcanza ese valor, la siguiente llegada entra antes de que expire y el panel
+  // se queda permanentemente en «Tren detectado»: fue el fallo reportado con 5 s.
+  assert.ok(DETECTION_HOLD_MS < HOLD_MAX_SEGURO_MS,
+    `La retención (${DETECTION_HOLD_MS} ms) debe ser menor que el tramo más corto (${HOLD_MAX_SEGURO_MS} ms).`);
+  // Y debe durar lo suficiente para leerla: el paso por el sensor es de ~0,1 s.
+  assert.ok(DETECTION_HOLD_MS >= 1000, 'Por debajo de 1 s no daría tiempo a leer la estación.');
 });

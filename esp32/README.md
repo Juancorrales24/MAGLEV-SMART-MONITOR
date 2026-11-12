@@ -18,7 +18,7 @@ detecta con tres sensores infrarrojos, uno por estación.
 3. **Cola FIFO de mensajes** en RAM, para no perder detecciones cuando llegan varias
    seguidas o la red se cae.
 4. **Pantalla LCD 1602 por I2C.** Muestra `ESTACION 2` mientras el sensor de esa
-   estación está activo, y la retiene **5 segundos tras la salida** (`RETENCION_ESTACION_MS`)
+   estación está activo, y la retiene **2 segundos tras la salida** (`RETENCION_ESTACION_MS`)
    antes de volver a `SIN OBSTACULOS`; si otro sensor se activa antes de que expire, lo
    reemplaza de inmediato. Si dos sensores están activos a la vez, se muestra el de
    **menor número de estación** (prioridad 1 > 2 > 3) — esa prioridad es solo para lo que
