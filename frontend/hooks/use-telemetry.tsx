@@ -1,8 +1,9 @@
 'use client';
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { getSupabase } from '@/lib/supabase';
 import { errorMessage, fresh, STALE_SECONDS } from '@/lib/format';
 import { linkState, lastDetection, DETECTION_HOLD_MS } from '@/lib/train-state';
+import { insertarFila, reemplazarFila, FILAS_MAX } from '@/lib/realtime-merge';
 import type { Device, DeviceHealth, Measurement, TrainStatus, SolarStation, Station } from '@/lib/database.types';
 type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; stations: Station[]; measurements: Measurement[]; train: TrainStatus[]; heldStation: number | null; solar: SolarStation[]; health: DeviceHealth[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
 const Context = createContext<Feed | null>(null);
@@ -15,6 +16,11 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [realtime, setRealtime] = useState('CONNECTING');
   const [online, setOnline] = useState(true); const [now, setNow] = useState(Date.now()); const [lastSync, setLastSync] = useState<string | null>(null);
   const version = useRef(0);
+  // Copia viva de los dispositivos para poder consultarlos desde los avisos de Realtime sin
+  // que el efecto del canal dependa de `devices` (lo recrearía en cada cambio) y sin leer el
+  // estado dentro de un actualizador, que debe ser puro.
+  const devicesRef = useRef<Device[]>([]);
+  useEffect(() => { devicesRef.current = devices; }, [devices]);
   // Retención visual de una llegada recién recibida (ver DETECTION_HOLD_MS). Se cuenta desde que el
   // navegador VE el evento nuevo, no desde su created_at: así la duración no depende de que el reloj
   // del equipo coincida con el del servidor. `undefined` = todavía no hubo primera carga del dispositivo.
@@ -53,11 +59,11 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
       if (selected !== deviceId) { selectDevice(selected); return; }
       if (!selected) { setMeasurements([]); setTrain([]); setSolar([]); setHealth([]); setError(''); setLastSync(new Date().toISOString()); return; }
       const [m, t, s, h] = await Promise.all([
-        client.from('measurements').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240),
-        client.from('train_status').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240),
-        client.from('solar_station').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240),
+        client.from('measurements').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(FILAS_MAX),
+        client.from('train_status').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(FILAS_MAX),
+        client.from('solar_station').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(FILAS_MAX),
         // Una muestra de salud cada ~30 s: 240 filas cubren unas 2 horas de funcionamiento.
-        client.from('device_health').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(240)
+        client.from('device_health').select('*').eq('device_id', selected).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(FILAS_MAX)
       ]);
       if (m.error || t.error || s.error || h.error) throw m.error || t.error || s.error || h.error;
       if (current !== version.current) return;
@@ -82,12 +88,40 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     const queueRefresh = () => { if (!active || timer) return; timer = setTimeout(() => { timer = undefined; void run(); }, 350); };
     // Tema único por suscripción: supabase-js reutiliza un canal con el mismo tema mientras aún se está cerrando,
     // lo que dejaba la nueva suscripción sin callbacks (StrictMode o cambio rápido A → B → A).
+    // El aviso de Realtime ya trae la fila, así que se aplica directamente en lugar de volver
+    // a descargar las cuatro tablas enteras (~175 KB por aviso con la ventana llena). Solo se
+    // recurre a la consulta completa en lo que no se puede aplicar: altas y bajas de
+    // dispositivos, cambios en `stations` y los avisos UPDATE/DELETE de telemetría, que este
+    // sistema no produce pero conviene no ignorar.
+    const alAplicar = () => { if (active) setLastSync(new Date().toISOString()); };
     let channel = client.channel(`telemetry-${deviceId || 'none'}-${++channelSequence}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, queueRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, payload => {
+        if (!active) return;
+        // `devices.last_seen` se actualiza en CADA mensaje del ESP32: era, con diferencia, el
+        // aviso más frecuente, y recargarlo todo por él dejaba el panel descargando sin parar.
+        if (payload.eventType !== 'UPDATE') return queueRefresh();
+        const fila = payload.new as Device;
+        // Un dispositivo que no tenemos cargado (recién creado) sí obliga a consultar.
+        if (!devicesRef.current.some(d => d.id === fila.id)) return queueRefresh();
+        setDevices(previo => reemplazarFila(previo, fila));
+        alAplicar();
+      })
       // `stations` es global: se escucha sin filtro de dispositivo para que un renombrado se refleje al instante.
       .on('postgres_changes', { event: '*', schema: 'public', table: 'stations' }, queueRefresh);
-    if (deviceId) for (const table of ['measurements', 'train_status', 'solar_station', 'device_health']) {
-      channel = channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `device_id=eq.${deviceId}` }, queueRefresh);
+    if (deviceId) {
+      const filtro = `device_id=eq.${deviceId}`;
+      const alta = <T extends { id: string; created_at: string }>(fijar: Dispatch<SetStateAction<T[]>>) =>
+        (payload: { eventType: string; new: unknown }) => {
+          if (!active) return;
+          if (payload.eventType !== 'INSERT') return queueRefresh();
+          fijar(previo => insertarFila(previo, payload.new as T));
+          alAplicar();
+        };
+      channel = channel
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'measurements', filter: filtro }, alta(setMeasurements))
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'train_status', filter: filtro }, alta(setTrain))
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'solar_station', filter: filtro }, alta(setSolar))
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'device_health', filter: filtro }, alta(setHealth));
     }
     channel.subscribe(status => { if (!active) return; setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
     const interval = setInterval(() => { void run(); }, 15000);
