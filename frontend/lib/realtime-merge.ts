@@ -51,3 +51,37 @@ export function reemplazarFila<T extends { id: string }>(filas: T[], nueva: T | 
   salida[i] = nueva;
   return salida;
 }
+
+// ---------------------------------------------------------------------------
+// Salud del canal Realtime.
+//
+// El WebSocket se cae sin aviso con frecuencia en redes móviles (hotspot del
+// celular) o cuando el navegador suspende la pestaña. Si no se reacciona, el
+// panel se queda "congelado" mostrando datos viejos hasta el siguiente sondeo
+// completo. Estas funciones deciden cuándo recrear el canal y con qué cadencia
+// sondear según el estado del canal.
+// ---------------------------------------------------------------------------
+
+/** Red de seguridad cuando el canal está vivo: solo cubre avisos perdidos. */
+export const SONDEO_CANAL_VIVO_MS = 20000;
+/** Con el canal caído el sondeo ES la fuente de datos: cadencia corta. */
+export const SONDEO_CANAL_CAIDO_MS = 4000;
+
+/** Cadencia del sondeo completo según el estado reportado por `subscribe`. */
+export function intervaloSondeo(estadoCanal: string) {
+  return estadoCanal === 'SUBSCRIBED' ? SONDEO_CANAL_VIVO_MS : SONDEO_CANAL_CAIDO_MS;
+}
+
+/** Estados tras los que supabase-js ya no va a entregar más avisos: hay que recrear el canal. */
+export function canalRoto(estadoCanal: string) {
+  return estadoCanal === 'CHANNEL_ERROR' || estadoCanal === 'TIMED_OUT' || estadoCanal === 'CLOSED';
+}
+
+export const ESPERA_RECONEXION_MIN_MS = 1000;
+export const ESPERA_RECONEXION_MAX_MS = 15000;
+
+/** Espera exponencial entre intentos de reconexión, acotada para no rendirse nunca del todo. */
+export function siguienteEspera(actualMs: number) {
+  if (!Number.isFinite(actualMs) || actualMs < ESPERA_RECONEXION_MIN_MS) return ESPERA_RECONEXION_MIN_MS * 2;
+  return Math.min(actualMs * 2, ESPERA_RECONEXION_MAX_MS);
+}

@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { getSupabase } from '@/lib/supabase';
 import { errorMessage, fresh, STALE_SECONDS } from '@/lib/format';
 import { linkState, lastDetection, DETECTION_HOLD_MS } from '@/lib/train-state';
-import { insertarFila, reemplazarFila, FILAS_MAX } from '@/lib/realtime-merge';
+import { insertarFila, reemplazarFila, intervaloSondeo, canalRoto, siguienteEspera, ESPERA_RECONEXION_MIN_MS, FILAS_MAX } from '@/lib/realtime-merge';
 import type { Device, DeviceHealth, Measurement, TrainStatus, SolarStation, Station } from '@/lib/database.types';
 type Feed = { devices: Device[]; deviceId: string; selectDevice: (id: string) => void; stations: Station[]; measurements: Measurement[]; train: TrainStatus[]; heldStation: number | null; solar: SolarStation[]; health: DeviceHealth[]; loading: boolean; error: string; realtime: string; online: boolean; now: number; lastSync: string | null; refresh: () => Promise<void> };
 const Context = createContext<Feed | null>(null);
@@ -94,38 +94,88 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     // dispositivos, cambios en `stations` y los avisos UPDATE/DELETE de telemetría, que este
     // sistema no produce pero conviene no ignorar.
     const alAplicar = () => { if (active) setLastSync(new Date().toISOString()); };
-    let channel = client.channel(`telemetry-${deviceId || 'none'}-${++channelSequence}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, payload => {
-        if (!active) return;
-        // `devices.last_seen` se actualiza en CADA mensaje del ESP32: era, con diferencia, el
-        // aviso más frecuente, y recargarlo todo por él dejaba el panel descargando sin parar.
-        if (payload.eventType !== 'UPDATE') return queueRefresh();
-        const fila = payload.new as Device;
-        // Un dispositivo que no tenemos cargado (recién creado) sí obliga a consultar.
-        if (!devicesRef.current.some(d => d.id === fila.id)) return queueRefresh();
-        setDevices(previo => reemplazarFila(previo, fila));
-        alAplicar();
-      })
-      // `stations` es global: se escucha sin filtro de dispositivo para que un renombrado se refleje al instante.
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'stations' }, queueRefresh);
-    if (deviceId) {
-      const filtro = `device_id=eq.${deviceId}`;
-      const alta = <T extends { id: string; created_at: string }>(fijar: Dispatch<SetStateAction<T[]>>) =>
-        (payload: { eventType: string; new: unknown }) => {
+    const construirCanal = () => {
+      let canal = client.channel(`telemetry-${deviceId || 'none'}-${++channelSequence}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, payload => {
           if (!active) return;
-          if (payload.eventType !== 'INSERT') return queueRefresh();
-          fijar(previo => insertarFila(previo, payload.new as T));
+          // `devices.last_seen` se actualiza en CADA mensaje del ESP32: era, con diferencia, el
+          // aviso más frecuente, y recargarlo todo por él dejaba el panel descargando sin parar.
+          if (payload.eventType !== 'UPDATE') return queueRefresh();
+          const fila = payload.new as Device;
+          // Un dispositivo que no tenemos cargado (recién creado) sí obliga a consultar.
+          if (!devicesRef.current.some(d => d.id === fila.id)) return queueRefresh();
+          setDevices(previo => reemplazarFila(previo, fila));
           alAplicar();
-        };
-      channel = channel
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'measurements', filter: filtro }, alta(setMeasurements))
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'train_status', filter: filtro }, alta(setTrain))
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'solar_station', filter: filtro }, alta(setSolar))
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'device_health', filter: filtro }, alta(setHealth));
-    }
-    channel.subscribe(status => { if (!active) return; setRealtime(status); if (status === 'SUBSCRIBED') queueRefresh(); });
-    const interval = setInterval(() => { void run(); }, 15000);
-    return () => { active = false; ++version.current; clearInterval(interval); clearTimeout(timer); void client.removeChannel(channel); };
+        })
+        // `stations` es global: se escucha sin filtro de dispositivo para que un renombrado se refleje al instante.
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'stations' }, queueRefresh);
+      if (deviceId) {
+        const filtro = `device_id=eq.${deviceId}`;
+        const alta = <T extends { id: string; created_at: string }>(fijar: Dispatch<SetStateAction<T[]>>) =>
+          (payload: { eventType: string; new: unknown }) => {
+            if (!active) return;
+            if (payload.eventType !== 'INSERT') return queueRefresh();
+            fijar(previo => insertarFila(previo, payload.new as T));
+            alAplicar();
+          };
+        canal = canal
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'measurements', filter: filtro }, alta(setMeasurements))
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'train_status', filter: filtro }, alta(setTrain))
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'solar_station', filter: filtro }, alta(setSolar))
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'device_health', filter: filtro }, alta(setHealth));
+      }
+      return canal;
+    };
+    // El WebSocket se cae sin aviso (red móvil, pestaña suspendida) y supabase-js deja el canal
+    // en CHANNEL_ERROR/TIMED_OUT/CLOSED sin volver a entregar avisos. Antes el panel se quedaba
+    // "congelado" hasta el sondeo fijo. Ahora: se recrea el canal con espera exponencial, el
+    // sondeo completo se acelera mientras el canal esté caído y al volver a la pestaña (o volver
+    // la conexión) se consulta de inmediato.
+    let channel: ReturnType<typeof construirCanal> | undefined;
+    let reconexion: ReturnType<typeof setTimeout> | undefined; let espera = ESPERA_RECONEXION_MIN_MS;
+    let estadoCanal = 'CONNECTING';
+    const abrirCanal = () => {
+      if (!active) return;
+      if (channel) void client.removeChannel(channel);
+      const propio = construirCanal();
+      channel = propio;
+      propio.subscribe(status => {
+        // Un canal ya reemplazado emite CLOSED al retirarlo: si se atendiera, reconectaría en bucle.
+        if (!active || channel !== propio) return;
+        estadoCanal = status; setRealtime(status);
+        if (status === 'SUBSCRIBED') { espera = ESPERA_RECONEXION_MIN_MS; queueRefresh(); return; }
+        if (canalRoto(status)) {
+          clearTimeout(reconexion);
+          reconexion = setTimeout(abrirCanal, espera);
+          espera = siguienteEspera(espera);
+        }
+      });
+    };
+    abrirCanal();
+    // Sondeo completo de seguridad: lento con el canal vivo (solo cubre avisos perdidos),
+    // rápido con el canal caído (pasa a ser la única fuente de datos).
+    let sondeo: ReturnType<typeof setTimeout> | undefined;
+    const programarSondeo = () => {
+      if (!active) return;
+      sondeo = setTimeout(() => { void run(); programarSondeo(); }, intervaloSondeo(estadoCanal));
+    };
+    programarSondeo();
+    // Al despertar la pestaña o recuperar la red, los temporizadores estuvieron frenados y el
+    // canal probablemente murió: consultar ya y reconectar sin esperar el backoff pendiente.
+    const alRecuperar = () => {
+      if (!active || document.visibilityState === 'hidden') return;
+      void run();
+      if (estadoCanal !== 'SUBSCRIBED') { clearTimeout(reconexion); espera = ESPERA_RECONEXION_MIN_MS; abrirCanal(); }
+    };
+    document.addEventListener('visibilitychange', alRecuperar);
+    window.addEventListener('online', alRecuperar);
+    return () => {
+      active = false; ++version.current;
+      clearTimeout(sondeo); clearTimeout(reconexion); clearTimeout(timer);
+      document.removeEventListener('visibilitychange', alRecuperar);
+      window.removeEventListener('online', alRecuperar);
+      if (channel) void client.removeChannel(channel);
+    };
   }, [deviceId, refresh]);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
