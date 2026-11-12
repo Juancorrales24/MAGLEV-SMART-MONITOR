@@ -40,6 +40,12 @@
 #ifndef SALUD_INTERVALO_MS
 #define SALUD_INTERVALO_MS 30000UL
 #endif
+// Cuanto retiene la LCD el nombre de la estacion tras salir el tren. Debe ser MENOR que
+// el tramo mas corto entre dos estaciones; si no, nunca llega a mostrarse "SIN
+// OBSTACULOS" (ver config.h.example para la aritmetica).
+#ifndef RETENCION_ESTACION_MS
+#define RETENCION_ESTACION_MS 2000UL
+#endif
 // Un intervalo entre llegadas mayor que esto no es una vuelta ni un tramo: es el tren
 // detenido un rato. No se envia (la API lo rechazaria igual, por contrato).
 #define INTERVALO_IR_MAX_MS 600000UL
@@ -218,9 +224,10 @@ bool encolarDocumento(JsonDocument& doc, uint8_t clase) {
 // Biblioteca: "LiquidCrystal I2C" de Frank de Brabander (ver esp32/README.md).
 // Si no esta instalada, poner LCD_ENABLED en 0 en config.h: el resto del firmware
 // compila y funciona igual, solo se queda sin pantalla.
-// Retencion LOCAL de la estacion, independiente de la latencia de Internet.
-// Se prioriza estacion 1 > 2 > 3 como en el programa original.
-const unsigned long RETENCION_ESTACION_MS = 5000UL;
+// Retencion LOCAL de la estacion (RETENCION_ESTACION_MS, arriba), independiente de la
+// latencia de Internet. Se prioriza estacion 1 > 2 > 3 como en el programa original.
+// El tren pasa por delante de cada sensor ~0,1 s: sin retencion no daria tiempo a leer
+// el nombre. Con demasiada, en cambio, la pantalla nunca vuelve a "SIN OBSTACULOS".
 
 // Nombres de las estaciones definidos en la web (Configuracion -> Estaciones de la via).
 // Llegan dentro de la respuesta de cada envio aceptado (campo "stations"), asi que un
@@ -1016,7 +1023,7 @@ void setup() {
   // lento lo bloquee. Pila generosa: ahi vive el handshake TLS, no en loop().
   xTaskCreatePinnedToCore(tareaRed, "tareaRed", 12288, nullptr, 1, &tareaRedHandle, 0);
   Serial.printf("ESP32 listo. Sensores GPIO 25/26/27, pantalla retenida %lu ms, cola de %u.\n",
-                RETENCION_ESTACION_MS, (unsigned)COLA_RANURAS);
+                (unsigned long)RETENCION_ESTACION_MS, (unsigned)COLA_RANURAS);
 }
 
 void loop() {

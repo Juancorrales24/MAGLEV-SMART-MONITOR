@@ -63,8 +63,14 @@ export function activeStation(views: StationView[]) {
  * RETENCION_ESTACION_MS del firmware (pantalla LCD): el tren está delante del sensor apenas
  * unas décimas de segundo, y sin retención la llegada y la salida suelen llegar en la misma
  * actualización, de modo que el panel no alcanzaba a mostrar el paso.
+ *
+ * El tope lo marca el tramo MÁS CORTO entre dos estaciones (medido: ~4,1 s). Si la
+ * retención lo alcanza, la siguiente llegada entra antes de que expire y el panel no
+ * vuelve nunca a «Sin detección activa», que es justo lo que pasaba con 5 s.
+ * `HOLD_MAX_SEGURO_MS` deja esa regla comprobada por una prueba, no solo comentada.
  */
-export const DETECTION_HOLD_MS = 5000;
+export const DETECTION_HOLD_MS = 2000;
+export const HOLD_MAX_SEGURO_MS = 4100;
 
 export type ShownDetection = {
   view: StationView;
