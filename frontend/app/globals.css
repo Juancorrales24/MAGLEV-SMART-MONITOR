@@ -245,7 +245,7 @@ td .badge{font-size:.65rem}
 .mobile-only{display:none}
 /* Acceso */
 .login-page{min-height:100dvh;display:grid;grid-template-columns:minmax(0,1fr) 480px;background:var(--bg);position:relative;isolation:isolate}
-.login-page:before{content:'';position:absolute;inset:0;z-index:-2;background:url('/maglev-station.png') center/cover no-repeat}
+.login-page:before{content:'';position:absolute;inset:0;z-index:-2;background:url('/maglev-station.webp') center/cover no-repeat}
 .login-page:after{content:'';position:absolute;inset:0;z-index:-1;background:linear-gradient(90deg,#0B0D1255 20%,#0B0D1288 48%,#0B0D12f2 80%),linear-gradient(0deg,#0B0D12f7 0%,transparent 42%,#0B0D1299 100%)}
 .login-story{padding:50px 55px;display:flex;flex-direction:column;justify-content:space-between;min-height:100dvh}
 .login-story .brand strong{font-size:2.4rem}
