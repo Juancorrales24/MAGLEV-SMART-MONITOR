@@ -18,6 +18,8 @@ Qué monitorea el sistema:
 | **A — Detección ferroviaria** | Eventos de los sensores infrarrojos: número de estación (1–3) y si es llegada o salida |
 | **B — Iluminación magnética** | **Nada.** Es un circuito independiente del ESP32; la web no recibe el estado de esos LED y se demuestra físicamente |
 | **C — Estación solar** | Voltaje del panel, voltaje de la batería y porcentaje **estimado** de batería |
+| **Tiempos y rapidez** | Tiempo entre estaciones y tiempo de vuelta medidos por el ESP32; rapidez media si las distancias de los tramos están configuradas en la web |
+| **Salud del ESP32** | Autodiagnóstico cada ~30 s: motivo del último arranque, tiempo encendido, señal WiFi, memoria libre y descartes de su cola |
 
 Qué **no** monitorea: altura de levitación, estabilidad magnética, temperatura, corriente
 y potencia. Las columnas correspondientes (`levitation_height`, `stability`,
@@ -28,11 +30,12 @@ esquema **por compatibilidad** con registros anteriores y quedan en `null`. El p
 El nombre del proyecto se conserva por continuidad académica, pero **no describe el
 principio físico del prototipo entregado**.
 
-> **Nada se ha probado con hardware.** No hay ESP32, sensores, panel, batería ni
-> instrumentos en el entorno donde se desarrolló esta entrega, y no existe compilador de
-> Arduino: el sketch **no se ha compilado ni cargado**. Todas las cifras de la
-> documentación son **cálculos teóricos** o **límites de validación del software**, nunca
-> mediciones. Ver `documentation/Verificacion.md`.
+> **Estado actual: el prototipo físico ya funciona.** El firmware se compiló y cargó con
+> Arduino IDE en el ESP32 real, que detecta el tren con los tres sensores infrarrojos,
+> muestra la estación en la pantalla LCD 1602 y envía datos reales por HTTPS a la
+> plataforma desplegada en producción. Las verificaciones que requieren instrumentos
+> (multímetro, calibración de los divisores) siguen **[POR CONFIRMAR]**: ver
+> `documentation/Verificacion.md`.
 
 Todas las cifras del panel proceden de la base de datos. No hay datos precargados,
 generadores aleatorios ni acceso de demostración.
@@ -108,6 +111,7 @@ Empieza por **`documentation/INDICE.md`**, que organiza todo lo demás.
 | `Instalacion.md` | Instalación guiada y solución de problemas |
 | `Modelo_Datos.md` | Tablas, unidades, rangos, tabla `stations`, contrato JSON con ejemplos y códigos HTTP |
 | `Integracion_ESP32.md` | Registro del dispositivo, `config.h`, bibliotecas y carga con Arduino IDE |
+| `GUIA_PASO_A_PASO_ESP32_MAGLEV.md` | Guía paso a paso: ESP32 físico, web, Supabase y GitHub |
 | `Verificacion_Electrica.md` | Multímetro **antes** del firmware: divisores, límites del ADC, batería de litio, panel |
 | `Verificacion_Sensores_IR.md` | Nivel activo, alcance, pin por estación, falsas detecciones |
 | `Verificacion_LCD_I2C.md` | Dirección I2C, SDA/SCL y convivencia en el bus |
@@ -117,7 +121,7 @@ Empieza por **`documentation/INDICE.md`**, que organiza todo lo demás.
 | `ARQUITECTURA.md` | Arquitectura y alcance del sistema |
 | `Verificacion.md` | Qué está implementado, qué cubren las pruebas y qué falta probar |
 | `Calculos_Experimentales.md` | Fórmulas y **tablas de registro vacías** para el informe |
-| `Ampliacion_Rapidez_Media.md` | **Diseño propuesto, no implementado**, de la rapidez media del tren |
+| `Ampliacion_Rapidez_Media.md` | Diseño inicial de la rapidez media, **ya implementada**; se conserva como historia del diseño |
 | `Fuentes_y_Recursos.md` | Documentación oficial y componentes por identificar |
 
 ## Pantallas incluidas
@@ -126,15 +130,15 @@ Empieza por **`documentation/INDICE.md`**, que organiza todo lo demás.
 |---|---|
 | `/login` | Acceso con Supabase Auth |
 | `/dashboard` | Vista general y estado de los subsistemas |
-| `/train` | Subsistema ferroviario: detecciones por estación |
+| `/train` | Subsistema ferroviario: detecciones por estación, tiempos de tramo, tiempo de vuelta y rapidez media |
 | `/solar` | Estación solar: voltajes y batería |
-| `/monitoring` | Conexión, última recepción y flujo de lecturas |
+| `/monitoring` | Conexión, última recepción, flujo de lecturas y salud del ESP32 |
 | `/history` | Filtros por dispositivo y fecha, orden, paginación y CSV de la página visible |
 | `/users` | Creación y edición de usuarios, rol y activación; solo administradores |
-| `/settings` | Registro y activación de dispositivos, rotación de claves, contraseña |
+| `/settings` | Dispositivos, rotación de claves, nombres y distancias de las estaciones, contraseña |
 
-> Las vistas `/train` y `/solar` se están adaptando al contrato nuevo. La referencia
-> válida de qué dato existe y qué significa es `documentation/Modelo_Datos.md`.
+> La referencia válida de qué dato existe y qué significa es
+> `documentation/Modelo_Datos.md`.
 
 ## Ejecutar la versión de producción
 
@@ -163,8 +167,11 @@ el ESP32 no apunta a tu computador.
   Supabase.
 - `supabase/`: estructura, políticas, funciones transaccionales, Realtime y primer
   administrador.
-- `esp32/MaglevSender/`: medida del panel y de la batería por ADC, y transporte HTTPS de
-  lecturas JSON reales.
+- `esp32/MaglevSender/`: sensores IR con antirrebote, pantalla LCD 1602 I2C con los
+  nombres de estación en vivo, medida del panel y de la batería por ADC, cola con
+  reintentos, conexión TLS persistente y autodiagnóstico; si `config.h` está incompleto,
+  arranca un monitor local en su propia red WiFi (página `/datos`).
+- `esp32/MaglevDiagnostico/`: diagnóstico de sensores y WiFi sin instrumentos.
 - `documentation/`: toda la documentación del proyecto.
 
 `node_modules`, `.next`, `.env.local` y `esp32/MaglevSender/config.h` no se versionan.
@@ -178,18 +185,29 @@ conservando las fechas en UTC en el CSV.
 
 “LIVE” exige suscripción activa, acceso a Internet, consultas sin error **y** recepción
 reciente del dispositivo. Un canal conectado sin mensajes del sensor **no** se presenta
-como un sistema operativo. Si Realtime falla, se mantienen consultas cada 15 segundos. Los
+como un sistema operativo. Si el canal de
+Realtime se cae, se reconecta solo y, mientras tanto, la web consulta cada 4 segundos
+(cada 20 segundos como respaldo cuando el canal está sano). Los
 valores ausentes aparecen como `—` y el cero real se conserva.
 
 La API exige al menos un bloque de mediciones, guarda todas las partes del mismo mensaje
-en una transacción y evita duplicados con `sample_id`. El límite es **un mensaje nuevo por
-segundo y por dispositivo**; conviene espaciar los envíos dos segundos o más. En
+en una transacción y evita duplicados con `sample_id`. El límite del servidor es **un
+mensaje nuevo cada 400 ms por dispositivo**; el firmware espacia sus envíos 500 ms o
+más. En
 `train_status`, **`station_number` y `detected` son obligatorios los dos**, y
 `detected: false` es la salida del sensor: un evento válido, no una lectura vacía.
 
 Los nombres de las tres estaciones se guardan en la tabla `stations` y se editan desde la
 plataforma. El firmware envía **solo el número del sensor**, de modo que renombrar una
-estación **no obliga a recargar el firmware**.
+estación **no obliga a recargar el firmware**. La respuesta de cada envío devuelve los
+nombres vigentes, así que la pantalla LCD del prototipo también muestra el nombre nuevo
+en vivo.
+
+Además del evento de paso, `train_status` guarda el tiempo desde la estación anterior y
+el tiempo de vuelta completa, medidos con el reloj interno del ESP32 (`millis()`), nunca
+con la hora de llegada al servidor. Con las distancias de los tramos configuradas en
+**Configuración → Estaciones de la vía**, la web calcula la rapidez media. La tabla
+`device_health` guarda el autodiagnóstico que el ESP32 envía cada ~30 s.
 
 ## Alcance comprobado
 
@@ -197,12 +215,14 @@ Lo verificado con **pruebas automatizadas** (`npm run check`) es el contrato de 
 validación, los permisos de la base y la ingestión, sobre una base PostgreSQL temporal en
 memoria. **Eso no prueba nada sobre el hardware.**
 
-Lo que **no** está probado: la compilación y carga del firmware, la lectura de los
-sensores infrarrojos, los voltajes del panel y de la batería, la calibración de los
-divisores, la pantalla LCD, el circuito magnético del Sistema B y la conexión real del
-ESP32. El detalle completo, con lo que queda **[POR CONFIRMAR]** del circuito, está en
-`documentation/Verificacion.md`.
+Ya comprobado con el hardware real: la compilación y carga del firmware, la detección
+del tren por los tres sensores infrarrojos, la pantalla LCD y el envío por HTTPS hasta
+la plataforma en producción. Lo que sigue **sin** verificar con instrumentos: la
+calibración de los divisores y la exactitud de los voltajes del panel y de la batería
+(no hay multímetro) y el circuito magnético del Sistema B. El detalle, con lo que queda
+**[POR CONFIRMAR]**, está en `documentation/Verificacion.md`.
 
-No se ha publicado ningún sitio ni se ha modificado un proyecto Supabase externo.
+La plataforma está desplegada en producción (Vercel + Supabase) y recibe los datos del
+prototipo real.
 
 Empieza por `documentation/INDICE.md`.
