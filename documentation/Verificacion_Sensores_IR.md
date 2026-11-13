@@ -4,8 +4,10 @@ Objetivo: **no confiar en los sensores hasta haberlos probado**. Un evento falso
 sensor confundido con otro produce un historial de detecciones que no corresponde al
 recorrido real del tren, y eso invalida cualquier conclusión del informe.
 
-Todo este documento está **[PENDIENTE DE PRUEBA FÍSICA]**. No se ha probado ningún
-sensor: no hay hardware ni compilador de Arduino en el entorno donde se escribió.
+Los tres sensores **ya funcionan en el prototipo**: presencia en nivel bajo, pines 26,
+27 y 25, y antirrebote asimétrico en el firmware (20 ms de llegada, 250 ms de salida,
+que absorbe el doble pulso observado en el sensor 2). Este documento queda como
+referencia de diagnóstico ante falsas detecciones o un sensor que deje de responder.
 
 ## Qué sabemos y qué no
 
@@ -176,10 +178,10 @@ Solo después de los pasos anteriores, y con el firmware definitivo configurado 
    espera.
 
 Limitación real del sistema que afecta a esta prueba: la API acepta **un mensaje nuevo
-por segundo y por dispositivo**; un segundo mensaje dentro del mismo segundo recibe
-**429** y el emisor lo reintenta con espera creciente. Si el tren pasa por dos sensores
-en menos de un segundo, los eventos **no se pierden pero llegan con retraso**. Tenlo en
-cuenta antes de concluir que un sensor falló. Ver `Modelo_Datos.md`.
+cada 400 ms por dispositivo**; un mensaje demasiado seguido recibe **429** y el emisor
+lo reintenta a los 600 ms desde su cola. Si el tren pasa por dos sensores muy seguidos,
+los eventos **no se pierden pero pueden llegar con retraso**. Tenlo en cuenta antes de
+concluir que un sensor falló. Ver `Modelo_Datos.md`.
 
 ## Lista de verificación
 

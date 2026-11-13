@@ -107,7 +107,7 @@ npm run build
 | Acceso pendiente | Ejecuta `bootstrap_admin.sql` o activa el perfil desde Usuarios. |
 | No se pudo cargar perfil | Revisa `database.sql`, el trigger, los permisos y la conexión. |
 | Las consultas funcionan pero crear usuario falla | Revisa `SUPABASE_SERVICE_ROLE_KEY` y `functions.sql`. |
-| Realtime no conecta | Ejecuta `realtime.sql`, revisa el acceso a WebSockets y los registros del proyecto. La consulta cada 15 s mantiene la vista mientras tanto. |
+| Realtime no conecta | Ejecuta `realtime.sql`, revisa el acceso a WebSockets y los registros del proyecto. La web reconecta sola y consulta cada 4 s mientras tanto. |
 | No aparecen valores | No hay lecturas para ese dispositivo, el emisor no llegó a la API, o el mensaje no traía ningún bloque. |
 | Los nombres de las estaciones no aparecen | Comprueba que `database.sql` creó la tabla `stations` con sus tres filas (`verify.sql` lo muestra). |
 | Renombrar una estación devuelve 404 | La `position` debe ser 1, 2 o 3 y la fila debe existir en `stations`. |
@@ -122,12 +122,12 @@ npm run build
 | **403** | Dispositivo **desactivado** en la plataforma, o usuario sin rol administrativo. |
 | **413** | El cuerpo supera 16 KiB. |
 | **415** | Falta `Content-Type: application/json`. |
-| **429** | Más de un mensaje nuevo por segundo por dispositivo. Espacia los envíos; el emisor reintenta solo. |
+| **429** | Más de un mensaje nuevo cada 400 ms por dispositivo. El emisor reintenta solo a los 600 ms. |
 | **500 / 503** | Error del servidor o configuración de Supabase incompleta. El emisor **conserva** la muestra y reintenta. |
 
 ### ESP32 y hardware
 
-Estos puntos están **[PENDIENTE DE PRUEBA FÍSICA]**: nada se ha probado con hardware.
+Estos puntos ya se ejercitaron con el prototipo real; la tabla queda para diagnóstico.
 
 | Síntoma | Revisión | Documento |
 |---|---|---|

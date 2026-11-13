@@ -52,7 +52,10 @@ con Supabase Auth, consulta el perfil real y exige `active=true` y `role=admin`.
 
 `AuthProvider` escucha eventos de autenticación y revisa el perfil cada 30 segundos.
 `TelemetryProvider` obtiene dispositivos, consulta las tablas de telemetría, se suscribe
-a cambios y realiza una consulta de respaldo cada 15 segundos. Limpia canales al cambiar
+a cambios y los aplica incrementalmente sobre la ventana cargada. Si el canal Realtime
+se cae, lo recrea con espera exponencial y, mientras tanto, consulta cada 4 segundos
+(cada 20 segundos como red de seguridad con el canal sano); al volver a la pestaña o
+recuperar la red consulta de inmediato. Limpia canales al cambiar
 de dispositivo o salir. Un contador de consultas evita aplicar respuestas anteriores a la
 selección actual, y una sola consulta automática corre a la vez.
 
@@ -62,10 +65,8 @@ lectura y la interfaz mantiene visible cuándo se recibió. Los mensajes de fall
 las últimas lecturas como información potencialmente antigua, sin afirmar que el sistema
 funciona normalmente.
 
-> Las vistas de tren y de estación solar están siendo adaptadas al contrato nuevo en esta
-> misma rama. El contrato de datos, la base y la API ya son los descritos aquí; si una
-> pantalla todavía muestra una etiqueta de la versión anterior, la referencia válida es
-> `Modelo_Datos.md`.
+> Las vistas de tren y de estación solar ya están adaptadas al contrato actual. La
+> referencia de qué dato existe y qué significa sigue siendo `Modelo_Datos.md`.
 
 ## Backend
 
@@ -108,29 +109,30 @@ transaccional para evitar cambios concurrentes incompatibles. `ingest_telemetry`
 el dispositivo durante la recepción, comprueba su estado, registra la identidad del
 mensaje, escribe las tablas y actualiza `last_seen` de forma atómica.
 
-Tablas publicadas en Realtime: `devices`, `measurements`, `stations`, `train_status` y
-`solar_station`. **`device_credentials` e `ingest_receipts` no se publican.**
+Tablas publicadas en Realtime: `devices`, `measurements`, `stations`, `train_status`,
+`solar_station` y `device_health`. **`device_credentials` e `ingest_receipts` no se
+publican.**
 
 ## Límite de frecuencia y su efecto en el diseño
 
-`ingest_telemetry` acepta **un mensaje nuevo por segundo y por dispositivo**. Con un solo
-ESP32 atendiendo los tres sensores y la estación solar, dos eventos muy seguidos provocan
-un **429** y el emisor reintenta con espera creciente de 2 a 60 segundos. El dato no se
-pierde, pero **la hora de llegada no es la hora del suceso**.
+`ingest_telemetry` acepta **un mensaje nuevo cada 400 ms por dispositivo**. El firmware
+espacia sus envíos 500 ms o más, mantiene una cola en RAM y, ante un **429**, reintenta
+con espera fija de 600 ms (ante 5xx o error de red, con espera exponencial hasta 60 s).
+El dato no se pierde, pero **la hora de llegada no es la hora del suceso**.
 
-De ahí una consecuencia de arquitectura: cualquier medición de tiempos entre estaciones
-debe hacerse con un **temporizador monotónico local del ESP32**, nunca con `created_at`.
-El diseño propuesto, no implementado, está en `Ampliacion_Rapidez_Media.md`.
+De ahí una consecuencia de arquitectura: los tiempos entre estaciones se miden con el
+**temporizador monotónico local del ESP32** (`millis()`), nunca con `created_at`. Así
+está implementado: los eventos de llegada viajan con `ms_from_prev` y `lap_ms` (ver
+`Modelo_Datos.md`); el diseño original se conserva en `Ampliacion_Rapidez_Media.md`.
 
 ## Alcance
 
 El sistema **consulta telemetría**: no controla el movimiento físico, el frenado, ni
 ningún actuador del prototipo. No se infiere seguridad operativa a partir de una conexión
-activa. La imagen del tren de la interfaz es una **ilustración conceptual**, no una
-transmisión de cámara, y además corresponde al diseño original con levitación, no al
-prototipo actual sobre ruedas.
+activa. La imagen de la pantalla de acceso es una **fotografía de la maqueta real**, no una
+transmisión de cámara; el esquema de la vía del panel es una ilustración.
 
-Lo que **no** incluye esta versión: cálculo de rapidez del tren, telemetría del Sistema B,
+Lo que **no** incluye esta versión: telemetría del Sistema B,
 medición de corriente o potencia, organizaciones separadas, alertas por correo, retención
 automática ni cola persistente en el ESP32. Las cuentas activas consultan todos los
 dispositivos de la instalación. Revisa los límites de tu plan de Supabase y la retención

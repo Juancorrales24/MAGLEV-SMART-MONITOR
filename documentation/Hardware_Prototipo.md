@@ -28,12 +28,13 @@ firmware no las produce. Ver `Modelo_Datos.md`.
 |---|---|
 | **[IMPLEMENTADO]** | Existe en el código de este repositorio y se puede leer en los archivos citados. |
 | **[PRUEBAS AUTOMATIZADAS]** | Cubierto por `frontend/tests/validation.test.ts` o `frontend/scripts/check-sql.mjs`. No es una prueba con hardware. |
-| **[PENDIENTE DE PRUEBA FÍSICA]** | Nunca se ha ejecutado con el circuito real. No hay ESP32, sensores ni instrumentos disponibles en el entorno donde se escribió esta documentación, ni compilador de Arduino. |
+| **[PENDIENTE DE PRUEBA FÍSICA]** | Nunca se ha ejecutado con el circuito real. |
 | **[POR CONFIRMAR]** | Dato del prototipo informado por el técnico que debe comprobarse con el circuito en la mano antes de darlo por cierto. |
 
-> **Nada de lo descrito aquí se ha probado con hardware real.** Todas las cifras
-> eléctricas que aparecen en esta documentación son **cálculos teóricos a partir de las
-> fórmulas**, o **rangos de validación del software**. No son mediciones.
+> El montaje ya funciona (sensores, LCD, WiFi y envío comprobados en marcha), pero las
+> **cifras eléctricas de esta documentación siguen siendo cálculos teóricos** a partir
+> de las fórmulas, o rangos de validación del software: **no hay multímetro** y nada
+> eléctrico se ha contrastado con una medición.
 
 ---
 
@@ -45,7 +46,7 @@ firmware no las produce. Ver `Modelo_Datos.md`.
 | Estaciones físicas | 3 | Numeradas 1, 2 y 3. El número lo fija el **cableado del sensor**. |
 | Sensores infrarrojos | 3 | Uno por estación. Modelo **[POR CONFIRMAR]**. |
 | ESP32 | 1 | Con WiFi. Modelo concreto de placa **[POR CONFIRMAR]**. |
-| Pantalla LCD 1602 con interfaz I2C | 1 | Dirección I2C **[POR CONFIRMAR]** (habitualmente 0x27 o 0x3F). |
+| Pantalla LCD 1602 con interfaz I2C | 1 | Dirección I2C configurada en `config.h` y comprobada en funcionamiento. |
 | WiFi | — | Red del salón o punto de acceso propio. Ver `Demostracion.md`. |
 
 Qué hace el sistema con esto:
@@ -58,7 +59,7 @@ Qué hace el sistema con esto:
   renombrar una estación no obliga a recargar el firmware. **[IMPLEMENTADO]**
 - La LCD 1602 es una salida **local** del prototipo. La web no recibe su contenido.
 
-### Pines del Sistema A — [POR CONFIRMAR]
+### Pines del Sistema A — confirmados en funcionamiento (26, 27 y 25)
 
 A la fecha de este documento, el sketch `esp32/MaglevSender/MaglevSender.ino`
 **no declara pines de sensores infrarrojos ni código de LCD**. El firmware se está
@@ -122,7 +123,7 @@ Qué **sí** mide y qué **no**:
   voltaje** mediante una curva aproximada de descarga de celda de litio, no una
   medición directa del estado de carga. Ver `Modelo_Datos.md`.
 
-### Pines del Sistema C — declarados en el código, [POR CONFIRMAR] en el circuito
+### Pines del Sistema C — comprobados en funcionamiento (lecturas sin calibrar)
 
 En `esp32/MaglevSender/MaglevSender.ino` están declarados:
 

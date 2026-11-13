@@ -22,7 +22,7 @@ la parte experimental del informe de Electromagnetismo.
 | 2 | Voltajes reales de panel y batería | **Medición pendiente** |
 | 3 | Calibración de `CAL_PANEL` y `CAL_BATERIA` | **Medición pendiente** |
 | 4 | Registro de pruebas de los sensores infrarrojos | **Medición pendiente** |
-| 5 | Rapidez media del tren | **No implementado** + **medición pendiente** |
+| 5 | Rapidez media del tren | **Implementado**; contraste con cronómetro manual pendiente |
 | 6 | Distancia de activación magnética (Sistema B) | **Medición pendiente** |
 | 7 | Mapa final de pines | **Por confirmar con el circuito** |
 
@@ -322,18 +322,18 @@ trazado de la vía, no en línea recta.
 | 5 | | | | | | | | | | |
 | **Media** | | | | | | | | | | |
 
-En **Origen del tiempo** escribe `cronómetro manual` o, si algún día se implementa,
-`temporizador del ESP32`. No mezcles los dos orígenes en una misma media sin decirlo.
+En **Origen del tiempo** escribe `cronómetro manual` o `temporizador del ESP32` (ya
+implementado: los eventos de llegada viajan con `ms_from_prev` y `lap_ms`). No mezcles
+los dos orígenes en una misma media sin decirlo.
 
 ### 5.4 Advertencia metodológica que debe constar en el informe
 
 **Los tiempos de paso no se pueden obtener de las horas de llegada de los mensajes al
-servidor.** El sistema limita la recepción a un mensaje nuevo por segundo por dispositivo
-y reintenta con esperas crecientes de 2 a 60 segundos ante fallos de red: la hora de
-llegada incluye esos retrasos y no es la hora del paso del tren. Por eso el diseño
-propuesto exige un **temporizador monotónico local en el ESP32**. La justificación
-detallada, con los mecanismos del código que lo provocan, está en
-`Ampliacion_Rapidez_Media.md`.
+servidor.** El sistema limita la recepción a un mensaje nuevo cada 400 ms por
+dispositivo y reintenta ante fallos de red con esperas de hasta 60 segundos: la hora de
+llegada incluye esos retrasos y no es la hora del paso del tren. Por eso los tiempos se
+miden con el **temporizador monotónico local del ESP32** (`millis()`), como está
+implementado. La justificación detallada está en `Ampliacion_Rapidez_Media.md`.
 
 ### 5.5 Fuentes de error a discutir
 
@@ -428,19 +428,19 @@ Tabla directamente reutilizable en la sección de alcance y limitaciones.
 
 | Elemento | Implementado en código | Verificado con pruebas automatizadas | Probado con hardware |
 |---|---|---|---|
-| Contrato JSON de `train_status` (`station_number`, `detected`) | Sí | Sí | **No** |
-| Contrato JSON de `solar_station` (`panel_voltage`, `battery_voltage`, `battery_level`) | Sí | Sí | **No** |
-| Ingestión atómica y deduplicación por `sample_id` | Sí | Sí | **No** |
-| Permisos de la base (RLS, secretos, cuentas inactivas) | Sí | Sí | **No** |
-| Tabla `stations` con nombres editables | Sí | Sí (valores iniciales) | **No** |
-| Transporte HTTPS con verificación TLS en el ESP32 | Sí | No aplica | **No** |
-| Medida de panel y batería por ADC con divisor | Sí (en el sketch) | No aplica | **No** |
-| Envío de `battery_voltage` por el firmware | **No** (lo mide pero no lo envía) | — | **No** |
-| Lectura de los sensores infrarrojos en el firmware | **No** (hoy entra por el puerto serie) | — | **No** |
-| Código de la LCD 1602 I2C | **No** | — | **No** |
-| Calibración `CAL_PANEL` / `CAL_BATERIA` | Constantes en `1.0`, sin calibrar | — | **No** |
+| Contrato JSON de `train_status` (`station_number`, `detected`, intervalos) | Sí | Sí | **Sí**: eventos reales en producción |
+| Contrato JSON de `solar_station` (`panel_voltage`, `battery_voltage`, `battery_level`) | Sí | Sí | **Sí**, con lecturas sin calibrar |
+| Ingestión atómica y deduplicación por `sample_id` | Sí | Sí | **Sí**: reintentos reales sin duplicados |
+| Permisos de la base (RLS, secretos, cuentas inactivas) | Sí | Sí | Sí (en producción) |
+| Tabla `stations` con nombres y distancias editables | Sí | Sí | **Sí**: renombrado visible en la web y en la LCD |
+| Transporte HTTPS con verificación TLS en el ESP32 | Sí | No aplica | **Sí** |
+| Medida de panel y batería por ADC con divisor | Sí | No aplica | **Sí**, sin calibrar |
+| Envío de `battery_voltage` por el firmware | Sí | No aplica | **Sí** |
+| Lectura de los sensores infrarrojos en el firmware | Sí (pines 26/27/25, antirrebote asimétrico) | No aplica | **Sí** |
+| Código de la LCD 1602 I2C | Sí (nombres de estación en vivo) | No aplica | **Sí** |
+| Calibración `CAL_PANEL` / `CAL_BATERIA` | Constantes en `1.0`, sin calibrar | — | **No**: requiere multímetro |
 | Medición de corriente o potencia | **No existe en el prototipo** | — | — |
-| Cálculo de rapidez media | **No implementado**; diseño propuesto | — | **No** |
+| Cálculo de rapidez media | **Sí**: tiempos del ESP32 (`millis()`) + distancias configuradas | Sí (`train-state.test.ts`) | **Sí**, en funcionamiento |
 | Sistema B (iluminación magnética) | **Fuera del sistema**: circuito independiente, sin telemetría | — | **No** |
 
 Nota sobre la columna "Verificado con pruebas automatizadas": se refiere a

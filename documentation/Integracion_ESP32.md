@@ -35,10 +35,9 @@ hecho las comprobaciones de `Verificacion_Electrica.md`,
 El firmware se está ampliando en esta misma rama. **Abre el archivo y comprueba qué
 pines y qué bloques produce** antes de dar por cierto cualquiera de estos puntos.
 
-> **Nada de esto se ha probado con hardware.** No hay ESP32, sensores ni compilador de
-> Arduino en el entorno donde se redactó esta documentación: el sketch **no se ha
-> compilado ni cargado**. Todo lo relativo a la placa está
-> **[PENDIENTE DE PRUEBA FÍSICA]**.
+> El sketch **ya se compiló y se cargó** con Arduino IDE en el ESP32 real, y el envío a
+> la plataforma funciona. Esta guía queda como referencia para repetir la carga, mover
+> el proyecto a otra placa o reconfigurar la red.
 
 ---
 
@@ -229,7 +228,7 @@ Mensajes que produce el firmware y qué significan:
 | `Completa config.h: …` | Falta un campo de `config.h`. El programa se detiene ahí. |
 | `Midiendo panel solar y bateria localmente; tambien acepta lecturas JSON por Serial.` | Arranque correcto. |
 | `OK: lectura recibida.` | La API respondió 200 o 201. |
-| `REINTENTO HTTP <código>` | Error de red, 429 o 5xx: conserva la muestra y reintenta con espera creciente. |
+| `REINTENTO HTTP <código>` | Conserva la muestra y reintenta: espera fija de 600 ms tras un 429; creciente hasta 60 s ante 5xx o error de red. |
 | `ERROR HTTP <código>: revisar credenciales o formato. Lectura descartada.` | 4xx definitivo (401, 403, 400, 413, 415): la muestra **se descarta**. Revisa credenciales y formato. |
 | `ERROR: JSON invalido del sensor.` | La línea recibida por serie no es JSON válido. |
 | `ERROR: falta un bloque de mediciones reales.` | La línea no trae ningún bloque con datos. |
@@ -274,9 +273,9 @@ String linea; serializeJson(evento, linea);
 acceptSensorLine(linea);
 ```
 
-Recuerda el límite de **un mensaje nuevo por segundo y por dispositivo**: con un solo
-ESP32 compartido por los tres sensores y la estación solar, dos eventos muy seguidos
-provocan **429** y reintento. El dato no se pierde, pero llega más tarde. Ver
+Recuerda el límite de **un mensaje nuevo cada 400 ms por dispositivo**: el firmware
+espacia sus envíos 500 ms o más y encola los eventos muy seguidos; un **429** se
+reintenta a los 600 ms. El dato no se pierde, pero puede llegar más tarde. Ver
 `Modelo_Datos.md`.
 
 ---
@@ -299,7 +298,9 @@ Orden recomendado, con el firmware ya cargado:
    **dejar de indicar LIVE**. Un panel que sigue diciendo que todo está en vivo con el
    emisor apagado es un fallo.
 
-Todas estas comprobaciones están **[PENDIENTE DE PRUEBA FÍSICA]**.
+Todas estas comprobaciones **ya se realizaron con el prototipo real** y la plataforma
+recibió los datos. Repítelas tras cualquier cambio de red, de credenciales o de
+firmware.
 
 ## 6. Límites honestos del emisor
 
