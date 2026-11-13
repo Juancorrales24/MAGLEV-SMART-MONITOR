@@ -1,15 +1,17 @@
-# Ampliación futura: rapidez media del tren entre estaciones
+# Rapidez media del tren entre estaciones — diseño original
 
-> ## Este documento es un DISEÑO PROPUESTO. NO ESTÁ IMPLEMENTADO.
+> ## Este diseño YA ESTÁ IMPLEMENTADO.
 >
-> No existe en el repositorio ninguna tabla, columna, campo del contrato, endpoint ni
-> línea de firmware que calcule la rapidez del tren. Nada de lo descrito aquí se ha
-> programado ni probado. Es una especificación para una versión posterior.
+> La implementación sigue el principio central de este documento: el ESP32 mide los
+> tiempos con su temporizador monotónico (`millis()`) y los envía dentro del propio
+> evento de llegada (`ms_from_prev`, `lap_ms`, `prev_station_number`); las distancias de
+> los tramos se configuran en la web (`stations.gap_to_next_m`) y la vista del tren
+> muestra tiempos de tramo, tiempo de vuelta y rapidez media en m/s y km/h. El contrato
+> vigente está en `Modelo_Datos.md`. Este documento se conserva como **historia del
+> diseño**: donde difiera de la implementación, manda el código.
 >
-> **En producción no debe haber velocidades simuladas.** Mientras no exista la medición
-> real, la plataforma no debe mostrar ninguna cifra de rapidez, ni estimada, ni de
-> ejemplo, ni "de prueba". Un campo vacío es correcto; un número inventado invalida el
-> informe.
+> **El principio se mantiene: en producción no hay velocidades simuladas.** Un tramo sin
+> distancia configurada muestra solo tiempos, nunca una rapidez inventada.
 
 ## 1. Qué se quiere calcular
 
@@ -54,12 +56,12 @@ produciría un resultado falso. Las causas están en el repositorio y se pueden 
 
 | Mecanismo real | Efecto sobre un Δt calculado en el servidor |
 |---|---|
-| Límite de **un mensaje nuevo por segundo y por dispositivo** (`ingest_telemetry`) | Si dos detecciones ocurren en menos de un segundo, la segunda recibe **429** y se retrasa |
-| Reintentos con **espera creciente de 2 s a 60 s** (`MaglevSender.ino`) | Una muestra puede llegar hasta un minuto después de haber ocurrido |
+| Límite de **un mensaje nuevo cada 400 ms por dispositivo** (`ingest_telemetry`) | Si dos detecciones ocurren muy seguidas, la segunda recibe **429** y se retrasa |
+| Reintentos de `MaglevSender.ino`: 600 ms fijos tras un 429, **espera creciente hasta 60 s** ante 5xx o error de red | Una muestra puede llegar hasta un minuto después de haber ocurrido |
 | **Reconexión WiFi** cada 10 s | Una caída breve de red desplaza la llegada |
 | Latencia de HTTPS y del alojamiento | Variable e impredecible, y distinta en cada mensaje |
 | `created_at` se asigna **en la base de datos**, al recibir | No es el instante del paso del tren |
-| El ESP32 **no envía `sampled_at`** hoy; el firmware no inventa esa fecha | No hay fecha de adquisición de la que partir |
+| El ESP32 **no envía `sampled_at`**; el firmware no inventa esa fecha | No hay fecha de adquisición de la que partir |
 
 Un ejemplo de la magnitud del error, puramente aritmético: si un tramo se recorre en
 2 segundos reales y el segundo mensaje llega 4 segundos tarde por un reintento, el

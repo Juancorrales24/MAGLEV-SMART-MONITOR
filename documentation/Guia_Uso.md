@@ -32,8 +32,9 @@ guion significa **dato desconocido**, no cero.
 
 Un canal conectado **sin mensajes del sensor no se presenta como un sistema operativo**:
 eso es intencional. El umbral de antigüedad para LIVE son 60 segundos por defecto
-(`NEXT_PUBLIC_STALE_SECONDS`, mínimo 10). Si Realtime no conecta, la consulta periódica
-cada 15 segundos mantiene la vista actualizada mientras haya Internet.
+(`NEXT_PUBLIC_STALE_SECONDS`, mínimo 10). Si el canal Realtime se cae, se reconecta
+solo y, mientras tanto, una consulta cada 4 segundos (cada 20 segundos como respaldo
+con el canal sano) mantiene la vista actualizada mientras haya Internet.
 
 ## Historial y exportación
 

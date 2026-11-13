@@ -15,15 +15,16 @@ detecta con sensores infrarrojos. Ver `Hardware_Prototipo.md`.
 | `devices` | Nombre, tipo, ubicación, habilitado, última recepción | API administrativa / ingestión |
 | `device_credentials` | Hash SHA-256 de la clave de cada dispositivo | Solo API administrativa |
 | `ingest_receipts` | Identidad de los mensajes aceptados | Solo ingestión; evita duplicados |
-| `stations` | **Nombres editables de las tres estaciones** | Solo API administrativa |
+| `stations` | **Nombres editables de las tres estaciones y distancia de cada tramo** | Solo API administrativa |
 | `train_status` | **Eventos de los sensores infrarrojos** | Solo ingestión |
 | `solar_station` | **Voltajes del panel y de la batería, porcentaje estimado** | Solo ingestión |
+| `device_health` | **Autodiagnóstico del ESP32** cada ~30 s: arranque, uptime, señal, memoria, descartes | Solo ingestión |
 | `measurements` | Variables eléctricas genéricas — **compatibilidad, no la usa el prototipo** | Solo ingestión |
 
 Cada tabla de lecturas tiene `id` UUID, `device_id` UUID, `sample_id` UUID, `sampled_at`
 opcional y `created_at` generado por el servidor. Un mensaje puede crear una fila en cada
-una de las tres tablas de lecturas, con la misma fecha de recepción y el mismo
-`sample_id`.
+una de las cuatro tablas de lecturas (`measurements`, `train_status`, `solar_station`,
+`device_health`), con la misma fecha de recepción y el mismo `sample_id`.
 
 `created_at` y `last_seen` determinan el estado de conexión. **No se usa el reloj del
 ESP32 para afirmar que una recepción es reciente.** `sampled_at` describe el momento de
@@ -37,6 +38,7 @@ las muestra en la zona local.
 | `id` | uuid | clave primaria | — |
 | `position` | smallint | **única**, entre 1 y 3 | Número de la estación, el mismo que viaja en `station_number` |
 | `name` | text | 1 a 100 caracteres | Etiqueta mostrada en la web |
+| `gap_to_next_m` | double | > 0 y ≤ 1000, anulable | **Distancia en metros hasta la estación siguiente** (1→2, 2→3, 3→1) siguiendo la vía; `null` = tramo sin medir, que muestra solo tiempos y nunca rapidez |
 | `created_at` | timestamptz | — | — |
 
 `database.sql` inserta las tres filas iniciales con los nombres `Estación 1`,
@@ -47,10 +49,15 @@ Separación importante:
 
 - El **firmware envía solo el número** (`station_number`), fijado por el cableado del
   sensor. Nunca envía el nombre.
-- El **nombre vive en la base** y se edita con `PATCH /api/admin/stations`
-  (`{ "position": 1-3, "name": "texto" }`), que exige sesión de **administrador
-  activo**. **[IMPLEMENTADO]** en `frontend/app/api/admin/stations/route.ts`.
+- El **nombre y la distancia viven en la base** y se editan con
+  `PATCH /api/admin/stations` (`{ "position": 1-3, "name": "texto" }` o
+  `{ "position": 1-3, "gap_to_next_m": metros | null }`), que exige sesión de
+  **administrador activo**. **[IMPLEMENTADO]** en
+  `frontend/app/api/admin/stations/route.ts`.
 - Por lo tanto **renombrar una estación no obliga a recargar el firmware**.
+- La respuesta de `/api/ingest` incluye los nombres vigentes, así que la **pantalla LCD
+  del prototipo** muestra el nombre nuevo desde el siguiente envío, también sin recargar
+  el firmware.
 - Los usuarios activos pueden **leer** `stations`; no pueden escribirla directamente
   (RLS solo concede `select`). La tabla está publicada en Realtime, así que un cambio de
   nombre llega al navegador sin recargar.
@@ -61,12 +68,16 @@ Separación importante:
 |---|---|---|---|
 | `station_number` | smallint | 1 a 3 | Qué sensor generó el evento |
 | `detected` | boolean | — | `true` = llegada/presencia; `false` = salida |
+| `prev_station_number` | smallint | 1 a 3, anulable | Solo en llegadas: estación desde la que venía el tren |
+| `ms_from_prev` | integer | 1 a 600000, anulable | Solo en llegadas: milisegundos del tramo anterior, medidos con `millis()` en el ESP32 |
+| `lap_ms` | integer | 1 a 600000, anulable | Solo en llegadas: milisegundos desde la llegada anterior a **esta misma** estación (tiempo de vuelta) |
 | `levitation_height` | double | 0 a 1000 | **Compatibilidad.** No es lectura del prototipo: queda `null` |
 | `stability` | double | 0 a 100 | **Compatibilidad.** No es lectura del prototipo: queda `null` |
 | `temperature` | double | −100 a 500 | **Compatibilidad.** No es lectura del prototipo: queda `null` |
 
-`ingest_telemetry` inserta **únicamente** `station_number` y `detected` desde el bloque
-`train_status`; las tres columnas de levitación **no se escriben nunca** y quedan en
+`ingest_telemetry` inserta `station_number`, `detected` y, cuando acompañan a una
+llegada, los tres campos de intervalos desde el bloque `train_status`; las tres columnas
+de levitación **no se escriben nunca** y quedan en
 `null`. Se conservan en la tabla para no destruir los registros de la versión anterior
 del proyecto. Está comprobado en `frontend/scripts/check-sql.mjs`
 (**[PRUEBAS AUTOMATIZADAS]**), que verifica que una ingestión con
@@ -95,6 +106,20 @@ Sobre `panel_current` y `power_output`: el prototipo **no tiene INA219 ni sensor
 corriente equivalente**. No deben rellenarse con un cálculo inventado ni mostrarse como
 medición. Quedan `null`, y la web representa `null` como `—`.
 
+### `device_health` — autodiagnóstico del ESP32
+
+| Columna | Tipo | Rango en la base | Significado |
+|---|---|---|---|
+| `reset_reason` | text | 1 a 40 caracteres | Motivo del último arranque (`alimentacion`, `brownout`, `software`, …) |
+| `uptime_s` | bigint | 0 a 4294967295 | Segundos desde el arranque |
+| `rssi_dbm` | smallint | −120 a 0 | Intensidad de la señal WiFi en dBm |
+| `free_heap_b` | integer | 0 a 1073741824 | Memoria libre, en bytes |
+| `queue_dropped` | integer | ≥ 0 | Mensajes descartados por la cola del firmware desde el arranque |
+
+El firmware lo envía cada ~30 s **solo si su cola está vacía**: el latido nunca compite
+con los eventos del tren. La vista de monitoreo lo presenta como «Salud del
+dispositivo».
+
 ### `measurements` — compatibilidad
 
 | Columna | Unidad | Rango |
@@ -121,7 +146,7 @@ Authorization: Bearer DEVICE_TOKEN
 X-Device-Id: DEVICE_ID
 ```
 
-Cuerpo: `sample_id` (UUID) y **al menos uno** de los tres bloques. Opcionalmente
+Cuerpo: `sample_id` (UUID) y **al menos uno** de los cuatro bloques. Opcionalmente
 `sampled_at` en ISO 8601 **con zona horaria**.
 
 | Campo raíz | Obligatorio | Regla |
@@ -131,6 +156,7 @@ Cuerpo: `sample_id` (UUID) y **al menos uno** de los tres bloques. Opcionalmente
 | `train_status` | Al menos un bloque | Ver abajo |
 | `solar_station` | Al menos un bloque | Ver abajo |
 | `measurements` | Al menos un bloque | Compatibilidad |
+| `device_health` | Al menos un bloque | Ver abajo |
 
 ### Bloque `train_status`
 
@@ -138,6 +164,9 @@ Cuerpo: `sample_id` (UUID) y **al menos uno** de los tres bloques. Opcionalmente
 |---|---|---|---|
 | `station_number` | entero | **Sí** | 1, 2 o 3 |
 | `detected` | booleano | **Sí** | `true` (llegada) o `false` (salida) |
+| `prev_station_number` | entero | No | 1 a 3; **va junto con** `ms_from_prev` |
+| `ms_from_prev` | entero | No | 1 a 600000 ms; **va junto con** `prev_station_number` |
+| `lap_ms` | entero | No | 1 a 600000 ms |
 
 **Los dos campos son obligatorios.** Este bloque **no** sigue la regla de "al menos una
 lectura numérica" de los bloques de medición, precisamente porque `detected: false` es
@@ -145,6 +174,11 @@ un evento válido: la **salida** del tren del campo del sensor, no una lectura v
 Está cubierto por `frontend/tests/validation.test.ts` (**[PRUEBAS AUTOMATIZADAS]**), que
 rechaza `station_number` igual a 0, a 4 o decimal, el bloque sin uno de los dos campos,
 `detected` como texto, y la mezcla con campos antiguos como `levitation_height`.
+
+Los intervalos **solo acompañan llegadas** (`detected: true`): en una salida se
+rechazan. `prev_station_number` y `ms_from_prev` van juntos o no van. Se miden en el
+ESP32 con `millis()` y se capan a 600000 ms (10 min): un intervalo mayor no se envía,
+porque ya no describe un tramo continuo de marcha.
 
 ### Bloque `solar_station`
 
@@ -159,6 +193,18 @@ rechaza `station_number` igual a 0, a 4 o decimal, el bloque sin uno de los dos 
 El bloque debe contener **al menos un número**. Un bloque con todos los campos en `null`
 o vacío se rechaza con 400.
 
+### Bloque `device_health`
+
+| Campo | Tipo | Obligatorio | Valores |
+|---|---|---|---|
+| `reset_reason` | texto | **Sí** | 1 a 40 caracteres |
+| `uptime_s` | entero | **Sí** | 0 a 4294967295 |
+| `rssi_dbm` | entero | **Sí** | −120 a 0 |
+| `free_heap_b` | entero | **Sí** | 0 a 1073741824 |
+| `queue_dropped` | entero | **Sí** | ≥ 0 |
+
+Dentro del bloque, los cinco campos son obligatorios (esquema estricto).
+
 ### Ejemplos — estructura, no mediciones
 
 > **Las cifras de estos ejemplos son valores de estructura para ilustrar el formato.
@@ -170,7 +216,13 @@ Evento de llegada del tren a la estación 2:
 ```json
 {
   "sample_id": "c0f1dd43-6db9-46fd-8b89-399a2ce4c480",
-  "train_status": { "station_number": 2, "detected": true }
+  "train_status": {
+    "station_number": 2,
+    "detected": true,
+    "prev_station_number": 1,
+    "ms_from_prev": 2350,
+    "lap_ms": 8120
+  }
 }
 ```
 
@@ -240,14 +292,14 @@ Tomados de `frontend/app/api/ingest/route.ts`, `frontend/lib/server.ts` y
 
 | Código | Cuerpo / causa |
 |---|---|
-| **201** | Lectura nueva guardada: `{ "ok": true, "duplicate": false }` |
-| **200** | Ese `sample_id` ya fue aceptado antes: `{ "ok": true, "duplicate": true }` |
+| **201** | Lectura nueva guardada: `{ "ok": true, "duplicate": false, "stations": [{ "position", "name" }, …] }` |
+| **200** | Ese `sample_id` ya fue aceptado antes: mismo cuerpo con `"duplicate": true` |
 | **400** | JSON inválido, campo desconocido, tipo o rango fuera de contrato, `sampled_at` más de 5 minutos en el futuro, mensaje sin ningún bloque, o rechazo de una restricción `check` de la base |
 | **401** | `X-Device-Id` no es un UUID, falta el token, el token supera 256 caracteres, o la clave no coincide con el hash almacenado |
 | **403** | Dispositivo **deshabilitado** desde la plataforma |
 | **413** | Cuerpo mayor de 16 KiB |
 | **415** | `Content-Type` distinto de `application/json` |
-| **429** | Más de un mensaje **nuevo** por segundo para ese dispositivo |
+| **429** | Más de un mensaje **nuevo** cada 400 ms para ese dispositivo |
 | **500** | Error no previsto del servidor o de la base |
 | **503** | Falta configuración de Supabase en el servidor, o Supabase Auth no responde |
 
@@ -258,6 +310,8 @@ Dos detalles de diseño que importan al firmware:
   explícito en el código y comentado allí.
 - Un **duplicado se detecta antes del límite de frecuencia**: reintentar el mismo
   `sample_id` devuelve 200, no 429.
+- La respuesta incluye los **nombres vigentes de las estaciones**: así la LCD del
+  prototipo los muestra en vivo sin necesitar otra consulta.
 
 ## Identidad de la muestra y deduplicación
 
@@ -274,19 +328,21 @@ Dos detalles de diseño que importan al firmware:
 ## Límite de frecuencia y su consecuencia práctica
 
 `ingest_telemetry` rechaza un mensaje nuevo si `last_seen` del dispositivo es de hace
-menos de **1 segundo**. Como `last_seen` se actualiza con cada mensaje aceptado, el
-límite es de **un mensaje nuevo por segundo y por dispositivo**, sea del tren o solar.
+menos de **400 ms**. Como `last_seen` se actualiza con cada mensaje aceptado, el límite
+es de **un mensaje nuevo cada 400 ms por dispositivo**, sea del tren, solar o de salud.
 
-Consecuencia concreta para este prototipo: hay **un solo ESP32** para los tres sensores y
-la estación solar. Si un evento de detección coincide con la muestra solar de los 5
-segundos, o si el tren pasa por dos sensores en menos de un segundo, el segundo mensaje
-recibe **429** y el emisor lo reintenta con espera creciente (2 s, 4 s, … hasta 60 s). El
-dato **no se pierde**, pero **llega más tarde**, y el `created_at` de la base reflejará la
-hora de recepción, no la del paso del tren.
+Consecuencia concreta para este prototipo: hay **un solo ESP32** para los tres sensores,
+la estación solar y el latido de salud. El firmware espacia sus envíos **500 ms o más**,
+mantiene una cola en RAM, pospone la muestra solar cuando hay eventos esperando (viaja
+adjunta al siguiente evento del tren) y salta el latido de salud con la cola ocupada.
+Ante un **429** reintenta a los 600 ms; ante 5xx o error de red, con espera exponencial
+hasta 60 s. El dato **no se pierde**, pero puede **llegar más tarde**, y el `created_at`
+de la base refleja la hora de recepción, no la del paso del tren.
 
-Por esa razón, cualquier cálculo de tiempos entre estaciones debe basarse en un
-temporizador **local** del ESP32 y no en las horas de llegada de los mensajes. Ver
-`Ampliacion_Rapidez_Media.md`.
+Por esa razón los tiempos entre estaciones **se miden en el ESP32** con `millis()` y
+viajan dentro del propio evento (`ms_from_prev`, `lap_ms`): las horas de llegada de los
+mensajes no intervienen en la rapidez. Ver `Ampliacion_Rapidez_Media.md` para la
+justificación completa.
 
 ## Índices y consultas
 

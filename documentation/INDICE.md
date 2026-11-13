@@ -6,11 +6,11 @@ Proyecto académico **MAGLEV SMART MONITOR** — Electromagnetismo, Unidades Tec
 Santander, grupo B193.
 
 > **Advertencia de alcance, válida para toda la documentación:** el prototipo **ya no usa
-> levitación magnética** (el tren circula sobre ruedas sobre rieles convencionales), y
-> **ningún componente físico se ha probado**: no hay ESP32, sensores ni instrumentos en el
-> entorno donde se redactó esta documentación, ni compilador de Arduino. Las cifras que
-> aparecen son **cálculos teóricos** o **límites de validación del software**, nunca
-> mediciones.
+> levitación magnética**: el tren circula sobre ruedas sobre rieles convencionales. El
+> firmware ya se cargó en el ESP32 real y el prototipo **envía datos a la plataforma en
+> producción**. Lo que sigue sin instrumentos (multímetro, calibración de los divisores)
+> permanece marcado **[POR CONFIRMAR]**, y las cifras sin medición siguen siendo cálculos
+> teóricos o límites de validación, indicados como tales.
 
 ## Empieza por aquí
 
@@ -47,7 +47,7 @@ Santander, grupo B193.
 | Documento | Contenido |
 |---|---|
 | `Calculos_Experimentales.md` | Fórmulas, procedimientos y **tablas de registro vacías**: divisor teórico vs experimental con error porcentual, voltajes de panel y batería, calibración, pruebas de los sensores IR, rapidez media y distancia de activación magnética |
-| `Ampliacion_Rapidez_Media.md` | **Diseño propuesto y no implementado** para calcular la rapidez media del tren, con la justificación de por qué los tiempos deben medirse con un temporizador monotónico local del ESP32 |
+| `Ampliacion_Rapidez_Media.md` | Diseño original de la rapidez media, **ya implementada**, con la justificación de por qué los tiempos se miden con un temporizador monotónico local del ESP32 |
 
 ## Los tres subsistemas del prototipo
 
@@ -63,7 +63,6 @@ Santander, grupo B193.
   compatibilidad** con registros anteriores y quedan en `null`.
 - No mide **corriente ni potencia**: no hay sensor de corriente en el prototipo.
 - No conoce el estado de los LED del Sistema B.
-- No calcula la **rapidez** del tren: hay un diseño propuesto, no implementado.
 - No controla el tren: ni tracción, ni frenado.
 
 ## Marcas de estado usadas en los documentos

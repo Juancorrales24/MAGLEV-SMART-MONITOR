@@ -189,7 +189,7 @@ Si `git check-ignore` no indica que `config.h` está ignorado, **no hagas push t
 | La LCD responde y la nube no | Configuración de WiFi, API_URL, DEVICE_ID/TOKEN, CA, NTP, Internet o servicio remoto |
 | HTTP 401 | DEVICE_ID o DEVICE_TOKEN incorrectos / clave rotada |
 | HTTP 403 | Dispositivo desactivado en Configuración |
-| HTTP 429 | Límite de 1 mensaje por segundo: el firmware conserva el mensaje y reintenta |
+| HTTP 429 | Límite de un mensaje cada 400 ms: el firmware conserva el mensaje y reintenta a los 600 ms |
 | HTTP 404 | API_URL no termina correctamente en `/api/ingest` o el despliegue no contiene esa ruta |
 | No hay corriente ni potencia | No existe sensor para esas magnitudes: no se deben inventar datos |
 

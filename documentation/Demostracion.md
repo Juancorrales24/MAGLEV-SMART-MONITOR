@@ -1,8 +1,9 @@
 # Preparar la demostración real del proyecto
 
-Guía operativa para el día de la sustentación. Nada de lo que aquí se describe se ha
-ensayado: está **[PENDIENTE DE PRUEBA FÍSICA]**. El valor de este documento es el orden
-y las decisiones tomadas de antemano, no una garantía de que todo funcionará.
+Guía operativa para el día de la sustentación. El sistema completo ya funcionó en
+ensayos reales (tren detectado por los tres sensores, LCD y web en vivo); aun así, el
+valor de este documento es el orden y las decisiones tomadas de antemano, no una
+garantía de que todo funcionará ese día.
 
 ## 1. Con días de antelación
 
@@ -131,7 +132,7 @@ Si no hay ninguna red, **no improvises y no finjas**:
 | `ERROR HTTP 403` | Dispositivo **desactivado** en la plataforma | Actívalo en Configuración |
 | `ERROR HTTP 400` | Bloque incompleto o campo desconocido | Revisa el JSON que entra por serie |
 | Falla el saludo TLS | Certificado raíz caducado o cadena cambiada; sin NTP | No se arregla en vivo: Plan B |
-| La web no dice LIVE pero hay datos | Más de 60 s sin recepción, o Realtime sin conectar | Espera el siguiente envío; la consulta periódica refresca cada 15 s |
+| La web no dice LIVE pero hay datos | Más de 60 s sin recepción, o Realtime sin conectar | Espera el siguiente envío; con Realtime caído la consulta de respaldo refresca cada 4 s |
 | Una estación muestra el número de otra | Sensores intercambiados en el cableado | Dilo con honestidad; corrige después |
 | Voltaje del panel muy bajo | Poca luz | Acerca la lámpara; explica la dependencia de la iluminación |
 | El porcentaje de batería salta | Es una **estimación por voltaje**, sensible a la corriente del momento | Explícalo así, es el comportamiento esperado |

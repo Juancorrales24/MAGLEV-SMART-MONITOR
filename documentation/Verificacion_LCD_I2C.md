@@ -4,10 +4,10 @@ La LCD es una **salida local** del prototipo: muestra información junto a la v�
 web no recibe su contenido** y no existe ningún campo del contrato de datos asociado a
 la pantalla.
 
-Todo este documento está **[PENDIENTE DE PRUEBA FÍSICA]**. A la fecha,
-`esp32/MaglevSender/MaglevSender.ino` **no contiene código de LCD**; el firmware se está
-ampliando en esta misma rama, así que revisa el archivo antes de dar por hecho qué
-biblioteca y qué pines usa.
+La pantalla **ya funciona en el prototipo**: `MaglevSender.ino` usa la biblioteca
+`LiquidCrystal I2C` (Frank de Brabander) y muestra el nombre de la estación en vivo,
+con los nombres que llegan en la respuesta de cada envío. Este documento queda como
+referencia de diagnóstico si el bus I2C da problemas.
 
 ## Qué hay que confirmar
 
