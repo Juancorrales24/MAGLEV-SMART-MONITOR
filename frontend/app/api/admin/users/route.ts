@@ -29,6 +29,15 @@ export async function PATCH(request: Request) {
       if (error.message.includes('invalid_profile')) throw new HttpError(400, 'Revisa el nombre y el rol.');
       throw error;
     }
+    // El cambio de contraseña está reservado al administrador: las cuentas de observador
+    // no tienen autoservicio en Configuración, así que esta es la única vía prevista.
+    if (payload.password) {
+      const r = await client.auth.admin.updateUserById(payload.id, { password: payload.password });
+      if (r.error) {
+        if (authUnavailable(r.error)) throw r.error;
+        throw new HttpError(400, 'El perfil se guardó, pero la contraseña no se pudo cambiar. Revisa la política de contraseñas.');
+      }
+    }
     return reply({ ok: true });
   } catch (error) { return failure(error); }
 }
